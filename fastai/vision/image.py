@@ -4,9 +4,12 @@ from ..basic_data import *
 from io import BytesIO
 import PIL
 
-__all__ = ['Image', 'ImageBBox', 'ImageSegment', 'ImagePoints', 'FlowField', 'RandTransform', 'TfmAffine', 'TfmCoord', 'TfmCrop', 
-           'TfmLighting', 'TfmPixel', 'Tfms', 'Transform', 'apply_tfms', 'bb2hw', 'image2np', 'log_uniform', 'logit', 'logit_', 
-           'open_image', 'open_mask', 'pil2tensor', 'rand_bool', 'scale_flow', 'show_image', 'uniform', 'uniform_int', 'CoordFunc']
+__all__ = ['Image', 'ImageBBox', 'ImageSegment', 'ImagePoints', 'FlowField', 'RandTransform', 'TfmAffine', 'TfmCoord',
+           'TfmCrop', 'TfmLighting', 'TfmPixel', 'Transform', 'apply_tfms', 'bb2hw', 'image2np', 'log_uniform',
+           'logit', 'logit_', 'open_image', 'open_mask', 'pil2tensor', 'rand_bool', 'scale_flow', 'show_image',
+           'uniform', 'uniform_int', 'CoordFunc', 'TfmList', 'open_mask_rle', 'rle_encode', 'rle_decode', 'ResizeMethod']
+
+ResizeMethod = IntEnum('ResizeMethod', 'CROP PAD SQUISH NO')
 
 def logit(x:Tensor)->Tensor:
     "Logit of `x`, clamped to avoid inf"
@@ -36,11 +39,13 @@ def uniform_int(low:int, high:int, size:Optional[List[int]]=None)->IntOrTensor:
     "Generate int or tensor `size` of ints between `low` and `high` (included)."
     return random.randint(low,high) if size is None else torch.randint(low,high+1,size)
 
-def pil2tensor(image:NPImage)->TensorImage:
+def pil2tensor(image:Union[NPImage,NPArray],dtype:np.dtype)->TensorImage:
     "Convert PIL style `image` array to torch style image tensor."
-    arr = ByteTensor(torch.ByteStorage.from_buffer(image.tobytes()))
-    arr = arr.view(image.size[1], image.size[0], -1)
-    return arr.permute(2,0,1)
+    a = np.asarray(image)
+    if a.ndim==2 : a = np.expand_dims(a,2)    
+    a = np.transpose(a, (1, 0, 2))
+    a = np.transpose(a, (2, 1, 0))
+    return torch.from_numpy( a.astype(dtype, copy=False) )
 
 def image2np(image:Tensor)->np.ndarray:
     "Convert from torch style `image` to numpy/matplotlib style."
@@ -78,7 +83,7 @@ class FlowField():
 CoordFunc = Callable[[FlowField, ArgStar, KWArgs], LogitTensorImage]
 
 class Image(ItemBase):
-    "Support applying transforms to image data in `px`." 
+    "Support applying transforms to image data in `px`."
     def __init__(self, px:Tensor):
         "Create from raw tensor image data `px`."
         self._px = px
@@ -122,6 +127,11 @@ class Image(ItemBase):
             self.sample_kwargs = {}
             self._flow = None
         return self
+    
+    def save(self, fn:PathOrStr):
+        "Save the image to `fn`."
+        x = image2np(self.data*255).astype(np.uint8)
+        PIL.Image.fromarray(x).save(fn)
 
     @property
     def px(self)->TensorImage:
@@ -197,13 +207,18 @@ class Image(ItemBase):
         return self.px
 
     def show(self, ax:plt.Axes=None, figsize:tuple=(3,3), title:Optional[str]=None, hide_axis:bool=True,
-              cmap:str='viridis', y:'Image'=None, **kwargs):
+              cmap:str='viridis', y:'Image'=None, classes:Collection[Any]=None, **kwargs):
         ax = show_image(self, ax=ax, hide_axis=hide_axis, cmap=cmap, figsize=figsize)
-        if y is not None: y.show(ax=ax, **kwargs)
-        if title: ax.set_title(title)
+        if y is not None:
+            if isinstance(y, Image): y.show(ax=ax, classes=classes, **kwargs)
+            else:
+                if not isinstance(y, Iterable): title = ifnone(title, classes[y])
+                else:  title = ifnone(title,'; '.join([classes[a] for a,t in enumerate(y) if t==1]))
+                ax.set_title(title)
+        elif title is not None: ax.set_title(title)
 
 class ImageSegment(Image):
-    "Support applying transforms to segmentation masks data in `px`."      
+    "Support applying transforms to segmentation masks data in `px`."
     def lighting(self, func:LightingFunc, *args:Any, **kwargs:Any)->'Image': return self
 
     def refresh(self):
@@ -216,8 +231,9 @@ class ImageSegment(Image):
         return self.px.long()
 
     def show(self, ax:plt.Axes=None, figsize:tuple=(3,3), title:Optional[str]=None, hide_axis:bool=True,
-        cmap:str='viridis', alpha:float=0.5):
-        ax = show_image(self, ax=ax, hide_axis=hide_axis, cmap=cmap, figsize=figsize, alpha=alpha)
+        cmap:str='tab20', alpha:float=0.5, **kwargs):
+        ax = show_image(self, ax=ax, hide_axis=hide_axis, cmap=cmap, figsize=figsize,
+                        interpolation='nearest', alpha=alpha, vmin=0)
         if title: ax.set_title(title)
 
 class ImagePoints(Image):
@@ -246,7 +262,7 @@ class ImagePoints(Image):
     def device(self)->torch.device: return self._flow.flow.device
 
     def __repr__(self): return f'{self.__class__.__name__} {tuple(self.size)}'
-    
+
     @property
     def flow(self)->FlowField:
         "Access the flow-field grid after applying queued affine and coord transforms."
@@ -259,10 +275,10 @@ class ImagePoints(Image):
             self.transformed = True
             self.flow_func = []
         return self._flow
-    
+
     @flow.setter
     def flow(self,v:FlowField):  self._flow=v
-    
+
     def coord(self, func:CoordFunc, *args, **kwargs)->'ImagePoints':
         "Put `func` with `args` and `kwargs` in `self.flow_func` for later."
         if 'invert' in kwargs: kwargs['invert'] = True
@@ -277,16 +293,16 @@ class ImagePoints(Image):
         self = func(self, *args, **kwargs)
         self.transformed=True
         return self
-    
+
     def refresh(self) -> 'ImagePoints':
         return self
-    
+
     def resize(self, size:Union[int,TensorImageSize]) -> 'ImagePoints':
         "Resize the image to `size`, size can be a single int."
         if isinstance(size, int): size=(1, size, size)
         self._flow.size = size[1:]
         return self
-    
+
     @property
     def data(self)->Tensor:
         "Return the points associated to this object."
@@ -296,8 +312,8 @@ class ImagePoints(Image):
                 flow = _remove_points_out(flow)
             self.transformed=False
         return flow.flow.flip(1)
-    
-    def show(self, ax:plt.Axes=None, figsize:tuple=(3,3), title:Optional[str]=None, hide_axis:bool=True):
+
+    def show(self, ax:plt.Axes=None, figsize:tuple=(3,3), title:Optional[str]=None, hide_axis:bool=True, **kwargs):
         if ax is None: _,ax = plt.subplots(figsize=figsize)
         pnt = scale_flow(FlowField(self.size, self.data), to_unit=False).flow.flip(1)
         ax.scatter(pnt[:, 0], pnt[:, 1], s=10, marker='.', c='r')
@@ -309,7 +325,7 @@ class ImageBBox(ImagePoints):
     def __init__(self, flow:FlowField, scale:bool=True, y_first:bool=True, labels:LongTensor=None, pad_idx:int=0):
         super().__init__(flow, scale, y_first)
         self.labels, self.pad_idx = labels, pad_idx
-        
+
     def clone(self) -> 'ImageBBox':
         "Mimic the behavior of torch.clone for `Image` objects."
         flow = FlowField(self.size, self.flow.flow.clone())
@@ -318,7 +334,7 @@ class ImageBBox(ImagePoints):
 
     @classmethod
     def create(cls, bboxes:Collection[Collection[int]], h:int, w:int, labels:LongTensor=None, pad_idx:int=0)->'ImageBBox':
-        "Create an ImageBBox object from `bboxes`."  
+        "Create an ImageBBox object from `bboxes`."
         bboxes = tensor(bboxes).float()
         tr_corners = torch.cat([bboxes[:,0][:,None], bboxes[:,3][:,None]], 1)
         bl_corners = bboxes[:,1:3].flip(1)
@@ -340,7 +356,7 @@ class ImageBBox(ImagePoints):
         return bboxes if lbls is None else (bboxes, lbls)
 
     def show(self, y:Image=None, ax:plt.Axes=None, figsize:tuple=(3,3), title:Optional[str]=None, hide_axis:bool=True,
-        color:str='white', classes:Classes=None):
+        color:str='white', classes:Collection[Any]=None, **kwargs):
         if ax is None: _,ax = plt.subplot(figsize=figsize)
         bboxes, lbls = self._compute_boxes()
         h,w = self.flow.size
@@ -353,20 +369,43 @@ class ImageBBox(ImagePoints):
 def open_image(fn:PathOrStr)->Image:
     "Return `Image` object created from image in file `fn`."
     x = PIL.Image.open(fn).convert('RGB')
-    return Image(pil2tensor(x).float().div_(255))
+    return Image(pil2tensor(x,np.float32).div_(255))
 
 def open_mask(fn:PathOrStr, div=False, convert_mode='L')->ImageSegment:
-    "Return `ImageMask` object create from mask in file `fn`. If `div`, divides pixel values by 255."
+    "Return `ImageSegment` object create from mask in file `fn`. If `div`, divides pixel values by 255."
     x = PIL.Image.open(fn).convert(convert_mode)
-    mask = pil2tensor(x).float()
+    mask = pil2tensor(x,np.float32)
     if div: mask.div_(255)
     return ImageSegment(mask)
 
+def open_mask_rle(mask_rle:str, shape:Tuple[int, int])->ImageSegment:
+    "Return `ImageSegment` object create from run-length encoded string in `mask_lre` with size in `shape`."
+    x = FloatTensor(rle_decode(str(mask_rle), shape).astype(np.uint8))
+    x = x.view(shape[1], shape[0], -1)
+    return ImageSegment(x.permute(2,0,1))
+
+def rle_encode(img:NPArrayMask)->str:
+    "Return run-length encoding string from an image array"  
+    pixels = np.concatenate([[0], img.flatten() , [0]]) 
+    runs = np.where(pixels[1:] != pixels[:-1])[0] + 1 
+    runs[1::2] -= runs[::2] 
+    return ' '.join(str(x) for x in runs) 
+
+def rle_decode(mask_rle:str, shape:Tuple[int,int])->NPArrayMask:
+    "Return an image array from run-length encoded string"
+    s = mask_rle.split() 
+    starts, lengths = [np.asarray(x, dtype=int) for x in (s[0:][::2], s[1:][::2])] 
+    starts -= 1 
+    ends = starts + lengths 
+    img = np.zeros(shape[0]*shape[1], dtype=np.uint) 
+    for low, up in zip(starts, ends): img[low:up] = 1 
+    return img.reshape(shape) 
+
 def show_image(img:Image, ax:plt.Axes=None, figsize:tuple=(3,3), hide_axis:bool=True, cmap:str='binary',
-                alpha:float=None)->plt.Axes:
+                alpha:float=None, **kwargs)->plt.Axes:
     "Display `Image` in notebook"
     if ax is None: fig,ax = plt.subplots(figsize=figsize)
-    ax.imshow(image2np(img.data), cmap=cmap, alpha=alpha)
+    ax.imshow(image2np(img.data), cmap=cmap, alpha=alpha, **kwargs)
     if hide_axis: ax.axis('off')
     return ax
 
@@ -413,7 +452,6 @@ class Transform():
     def __repr__(self)->str: return f'{self.name} ({self.func.__name__})'
 
 TfmList = Union[Transform, Collection[Transform]]
-Tfms = Optional[TfmList]
 
 @dataclass
 class RandTransform():
@@ -533,7 +571,7 @@ def _get_resize_target(img, crop_target, do_crop=False)->TensorImageSize:
 
 def apply_tfms(tfms:TfmList, x:TensorImage, do_resolve:bool=True,
                xtra:Optional[Dict[Transform,dict]]=None, size:Optional[Union[int,TensorImageSize]]=None,
-               mult:int=32, do_crop:bool=True, padding_mode:str='reflection', **kwargs:Any)->TensorImage:
+               mult:int=32, resize_method:ResizeMethod=ResizeMethod.CROP, padding_mode:str='reflection', **kwargs:Any)->TensorImage:
     "Apply all `tfms` to `x` - `do_resolve`: bind random args - `size`, `mult` used to crop/pad."
     if tfms or xtra or size:
         if not xtra: xtra={}
@@ -543,11 +581,16 @@ def apply_tfms(tfms:TfmList, x:TensorImage, do_resolve:bool=True,
         x.set_sample(padding_mode=padding_mode, **kwargs)
         if size:
             crop_target = _get_crop_target(size, mult=mult)
-            target = _get_resize_target(x, crop_target, do_crop=do_crop)
-            x.resize(target)
+            if resize_method in (ResizeMethod.CROP,ResizeMethod.PAD):
+                target = _get_resize_target(x, crop_target, do_crop=(resize_method==ResizeMethod.CROP))
+                x.resize(target)
+            elif resize_method==ResizeMethod.SQUISH: x.resize((x.shape[0],) + crop_target)
+        else: size = x.size
         size_tfms = [o for o in tfms if isinstance(o.tfm,TfmCrop)]
         for tfm in tfms:
             if tfm.tfm in xtra: x = tfm(x, **xtra[tfm.tfm])
-            elif tfm in size_tfms: x = tfm(x, size=size, padding_mode=padding_mode)
+            elif tfm in size_tfms:
+                if resize_method in (ResizeMethod.CROP,ResizeMethod.PAD):
+                    x = tfm(x, size=size, padding_mode=padding_mode)
             else: x = tfm(x)
     return x

@@ -1,6 +1,7 @@
 import pytest, torch
 import numpy as np
 from fastai import *
+from tempfile import TemporaryDirectory
 
 def test_cpus(): assert num_cpus() >= 1
 
