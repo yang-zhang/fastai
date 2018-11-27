@@ -8,7 +8,7 @@ from ..callback import *
 from ..layers import *
 from ..callbacks.hooks import num_features_model
 
-__all__ = ['ClassificationLearner', 'create_cnn', 'create_body', 'create_head', 'ClassificationInterpretation']
+__all__ = ['create_cnn', 'create_body', 'create_head', 'ClassificationInterpretation']
 # By default split models between first and second layer
 def _default_split(m:nn.Module): return (m[1],)
 # Split a resnet style model
@@ -31,7 +31,7 @@ def create_body(model:nn.Module, cut:Optional[int]=None, body_fn:Callable[[nn.Mo
     return (nn.Sequential(*list(model.children())[:cut]) if cut
             else body_fn(model) if body_fn else model)
 
-def create_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5):
+def create_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5, bn_final:bool=False):
     """Model head that takes `nf` features, runs through `lin_ftrs`, and about `nc` classes.
     :param ps: dropout, can be a single float or a list for each layer."""
     lin_ftrs = [nf, 512, nc] if lin_ftrs is None else [nf] + lin_ftrs + [nc]
@@ -41,43 +41,34 @@ def create_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floa
     layers = [AdaptiveConcatPool2d(), Flatten()]
     for ni,no,p,actn in zip(lin_ftrs[:-1],lin_ftrs[1:],ps,actns):
         layers += bn_drop_lin(ni,no,True,p,actn)
+    if bn_final: layers.append(nn.BatchNorm1d(lin_ftrs[-1], momentum=0.01))
     return nn.Sequential(*layers)
-
-class ClassificationLearner(Learner):
-    def predict(self, img:Image):
-        "Return prect class, label and probabilities for `img`."
-        ds = self.data.valid_ds
-        ds.set_item(img)
-        res = self.pred_batch()[0]
-        ds.clear_item()
-        pred_max = res.argmax()
-        return self.data.classes[pred_max],pred_max,res
 
 def create_cnn(data:DataBunch, arch:Callable, cut:Union[int,Callable]=None, pretrained:bool=True,
                 lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5,
                 custom_head:Optional[nn.Module]=None, split_on:Optional[SplitFuncOrIdxList]=None,
-                classification:bool=True, **kwargs:Any)->ClassificationLearner:
+                classification:bool=True, bn_final:bool=False, **kwargs:Any)->Learner:
     "Build convnet style learners."
     assert classification, 'Regression CNN not implemented yet, bug us on the forums if you want this!'
     meta = cnn_config(arch)
     body = create_body(arch(pretrained), ifnone(cut,meta['cut']))
     nf = num_features_model(body) * 2
-    head = custom_head or create_head(nf, data.c, lin_ftrs, ps)
+    head = custom_head or create_head(nf, data.c, lin_ftrs, ps=ps, bn_final=bn_final)
     model = nn.Sequential(body, head)
-    learn = ClassificationLearner(data, model, **kwargs)
+    learn = Learner(data, model, **kwargs)
     learn.split(ifnone(split_on,meta['split']))
     if pretrained: learn.freeze()
     apply_init(model[1], nn.init.kaiming_normal_)
     return learn
 
 @classmethod
-def Learner_create_unet(cls, data:DataBunch, arch:Callable, pretrained:bool=True,
-             split_on:Optional[SplitFuncOrIdxList]=None, **kwargs:Any)->None:
+def Learner_create_unet(cls, data:DataBunch, arch:Callable, pretrained:bool=True, all_wn:bool=False,
+                        split_on:Optional[SplitFuncOrIdxList]=None, blur:bool=False, **kwargs:Any)->None:
     "Build Unet learners."
     meta = cnn_config(arch)
     body = create_body(arch(pretrained), meta['cut'])
-    model = to_device(models.unet.DynamicUnet(body, n_classes=data.c), data.device)
-    learn = cls(data, model, **kwargs)
+    model = to_device(models.unet.DynamicUnet(body, n_classes=data.c, all_wn=all_wn, blur=blur), data.device)
+    learn = Learner(data, model, **kwargs)
     learn.split(ifnone(split_on,meta['split']))
     if pretrained: learn.freeze()
     apply_init(model[2], nn.init.kaiming_normal_)
@@ -110,9 +101,10 @@ class ClassificationInterpretation():
         fig,axes = plt.subplots(rows,rows,figsize=figsize)
         fig.suptitle('prediction/actual/loss/probability', weight='bold', size=14)
         for i,idx in enumerate(tl_idx):
-            t=self.data.valid_ds[idx]
-            t[0].show(ax=axes.flat[i], title=
-                f'{classes[self.pred_class[idx]]}/{classes[t[1]]} / {self.losses[idx]:.2f} / {self.probs[idx][t[1]]:.2f}')
+            im,cl = self.data.valid_ds[idx]
+            cl = int(cl)
+            im.show(ax=axes.flat[i], title=
+                f'{classes[self.pred_class[idx]]}/{classes[cl]} / {self.losses[idx]:.2f} / {self.probs[idx][cl]:.2f}')
 
     def confusion_matrix(self, slice_size:int=None):
         "Confusion matrix as an `np.ndarray`."

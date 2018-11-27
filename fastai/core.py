@@ -45,6 +45,9 @@ def num_cpus()->int:
     try:                   return len(os.sched_getaffinity(0))
     except AttributeError: return os.cpu_count()
 
+_default_cpus = min(16, num_cpus())
+defaults = SimpleNamespace(cpus=_default_cpus)
+
 def is_listy(x:Any)->bool: return isinstance(x, (tuple,list))
 def is_tuple(x:Any)->bool: return isinstance(x, tuple)
 def noop(x): return x
@@ -58,9 +61,15 @@ def ifnone(a:Any,b:Any)->Any:
     "`a` if `a` is not None, otherwise `b`."
     return b if a is None else a
 
+def is1d(a:Collection)->bool:
+    "Returns True if a collection is one dimensional"
+    return len(a.shape) == 1 if hasattr(a, 'shape') else True
+
 def uniqueify(x:Series)->List:
     "Return unique values of `x`"
-    return list(OrderedDict.fromkeys(x).keys())
+    res = list(OrderedDict.fromkeys(x).keys())
+    res.sort()
+    return res
 
 def idx_dict(a): return {v:k for k,v in enumerate(a)}
 
@@ -86,6 +95,7 @@ def random_split(valid_pct:float, *arrs:NPArrayableList)->SplitArrayList:
 def listify(p:OptListOrItem=None, q:OptListOrItem=None):
     "Make `p` same length as `q`"
     if p is None: p=[]
+    elif isinstance(p, str):          p=[p]
     elif not isinstance(p, Iterable): p=[p]
     n = q if type(q)==int else len(p) if q is None else len(q)
     if len(p)==1: p = p * n
@@ -125,14 +135,16 @@ def series2cat(df:DataFrame, *col_names):
     "Categorifies the columns `col_names` in `df`."
     for c in listify(col_names): df[c] = df[c].astype('category').cat.as_ordered()
 
+TfmList = Union[Callable, Collection[Callable]]
+
 class ItemBase():
     "All transformable dataset items use this type."
-    @property
-    @abstractmethod
-    def device(self): pass
-    @property
-    @abstractmethod
-    def data(self): pass
+    def __init__(self, data:Any): self.data=self.obj=data
+    def __repr__(self): return f'{self.__class__.__name__} {self}'
+    def show(self, ax:plt.Axes, **kwargs): ax.set_title(str(self))
+    def apply_tfms(self, tfms:Collection, **kwargs):
+        if tfms: raise Exception('Not implemented')
+        return self
 
 def download_url(url:str, dest:str, overwrite:bool=False, pbar:ProgressBar=None,
                  show_progress=True, chunk_size=1024*1024, timeout=4)->None:
@@ -175,7 +187,82 @@ def save_texts(fname:PathOrStr, texts:Collection[str]):
     with open(fname, 'w') as f:
         for t in texts: f.write(f'{t}\n')
 
-def df_names_to_idx(names, df):
+def df_names_to_idx(names:IntsOrStrs, df:DataFrame):
+    "Return the column indexes of `names` in `df`."
     if not is_listy(names): names = [names]
     if isinstance(names[0], int): return names
     return [df.columns.get_loc(c) for c in names]
+
+def one_hot(x:Collection[int], c:int):
+    "One-hot encode the target."
+    res = np.zeros((c,), np.float32)
+    res[x] = 1.
+    return res
+
+def index_row(a:Union[Collection,pd.DataFrame,pd.Series], idxs:Collection[int])->Any:
+    "Return the slice of `a` corresponding to `idxs`."
+    if a is None: return a
+    if isinstance(a,(pd.DataFrame,pd.Series)):
+        res = a.iloc[idxs]
+        if isinstance(res,(pd.DataFrame,pd.Series)): return res.copy()
+        return res
+    return a[idxs]
+
+def func_args(func)->bool:
+    "Return the arguments of `func`."
+    code = func.__code__
+    return code.co_varnames[:code.co_argcount]
+
+def has_arg(func, arg)->bool: return arg in func_args(func)
+
+def split_kwargs_by_func(kwargs, func):
+    "Split `kwargs` between those expected by `func` and the others."
+    args = func_args(func)
+    func_kwargs = {a:kwargs.pop(a) for a in args if a in kwargs}
+    return func_kwargs, kwargs
+
+def try_int(o:Any)->Any:
+    "Try to conver `o` to int, default to `o` if not possible."
+    try: return int(o)
+    except: return o
+
+def array(a, *args, **kwargs)->np.ndarray:
+    "Same as `np.array` but also handles generators"
+    if not isinstance(a, collections.Sized) and not getattr(a,'__array_interface__',False):
+        a = list(a)
+    return np.array(a, *args, **kwargs)
+
+class EmptyLabel(ItemBase):
+    def __init__(self): self.obj,self.data = 0.,0.
+    def __str__(self):  return ''
+
+class Category(ItemBase):
+    def __init__(self,data,obj): self.data,self.obj = data,obj
+    def __int__(self): return int(self.data)
+    def __str__(self): return str(self.obj)
+
+class MultiCategory(ItemBase):
+    def __init__(self,data,obj,raw): self.data,self.obj,self.raw = data,obj,raw
+    def __str__(self): return ';'.join([str(o) for o in self.obj])
+
+def _treat_html(o:str)->str:
+    return o.replace('\n','\\n')
+
+def text2html_table(items:Collection[Collection[str]], widths:Collection[int])->str:
+    html_code = f"<table>"
+    for w in widths: html_code += f"  <col width='{w}%'>"
+    for line in items:
+        html_code += "  <tr>\n"
+        html_code += "\n".join([f"    <th>{_treat_html(o)}</th>" for o in line if len(o) >= 1])
+        html_code += "\n  </tr>\n"
+    return html_code + "</table>\n"
+
+def parallel(func, arr:Collection, max_workers:int=None):
+    "Call `func` on every element of `arr` in parallel using `max_workers`"
+    max_workers = ifnone(max_workers, defaults.cpus)
+    if max_workers<2: _ = [func(o,i) for i,o in enumerate(arr)]
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(func,o,i) for i,o in enumerate(arr)]
+            for f in progress_bar(concurrent.futures.as_completed(futures), total=len(arr)): pass
+
