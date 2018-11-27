@@ -1,6 +1,7 @@
 "Provides advanced training extensions to `fastai.basic_train`. Includes half-precision, learning rate finder, mixup, and one-cycle"
 from .torch_core import *
 from .callbacks import *
+from .basic_data import *
 from .basic_train import *
 
 __all__ = ['BnFreeze', 'GradientClipping', 'ShowGraph', 'fit_one_cycle', 'lr_find', 'one_cycle_scheduler', 'to_fp16', 'mixup']
@@ -20,7 +21,9 @@ def fit_one_cycle(learn:Learner, cyc_len:int, max_lr:Union[Floats,slice]=default
 
 def lr_find(learn:Learner, start_lr:Floats=1e-7, end_lr:Floats=10, num_it:int=100, stop_div:bool=True, **kwargs:Any):
     "Explore lr from `start_lr` to `end_lr` over `num_it` iterations in `learn`. If `stop_div`, stops when loss explodes."
+    start_lr = learn.lr_range(start_lr)
     start_lr = np.array(start_lr) if is_listy(start_lr) else start_lr
+    end_lr = learn.lr_range(end_lr)
     end_lr = np.array(end_lr) if is_listy(end_lr) else end_lr
     cb = LRFinder(learn, start_lr, end_lr, num_it, stop_div)
     a = int(np.ceil(num_it/len(learn.data.train_dl)))
@@ -50,7 +53,7 @@ class ShowGraph(LearnerCallback):
         "If we have metrics plot them in our pbar graph"
         if last_metrics is not None:
             rec = self.learn.recorder
-            iters = list(range(len(rec.losses)))
+            iters = range_of(rec.losses)
             val_iter = np.array(rec.nb_batches).cumsum()
             x_bounds = (0, (n_epochs - len(rec.nb_batches)) * rec.nb_batches[-1] + len(rec.losses))
             y_bounds = (0, max((max(Tensor(rec.losses)), max(Tensor(rec.val_losses)))))
@@ -65,9 +68,16 @@ class BnFreeze(LearnerCallback):
 
 @dataclass
 class GradientClipping(LearnerCallback):
-    "To do gradient clipping during training."
+    "Gradient clipping during training."
     clip:float
 
     def on_backward_end(self, **kwargs):
-        if self.clip:  nn.utils.clip_grad_norm_(self.learn.model.parameters(), self.clip)
+        if self.clip: nn.utils.clip_grad_norm_(self.learn.model.parameters(), self.clip)
+
+def clip_grad(learn:Learner, clip:float=0.1)->Learner:
+    "Gradient clipping during training."
+    learn.callback_fns.append(partial(GradientClipping, clip=clip))
+    return learn
+
+Learner.clip_grad = clip_grad
 

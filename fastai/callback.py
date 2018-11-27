@@ -21,8 +21,14 @@ class OptimWrapper():
         split_groups = split_bn_bias(layer_groups)
         opt = opt_func([{'params': trainable_params(l), 'lr':0} for l in split_groups])
         opt = cls(opt, **kwargs)
-        opt.lr = listify(lr, layer_groups)
+        opt.lr,opt.opt_func = listify(lr, layer_groups),opt_func
         return opt
+    
+    def new(self, layer_groups:ModuleList):
+        opt_func = getattr(self, 'opt_func', self.opt.__class__)
+        split_groups = split_bn_bias(layer_groups)
+        opt = opt_func([{'params': trainable_params(l), 'lr':0} for l in split_groups])
+        return self.create(opt_func, self.lr, layer_groups, wd=self.wd, true_wd=self.true_wd, bn_wd=self.bn_wd)
 
     def __repr__(self)->str:
         return f'OptimWrapper over {repr(self.opt)}.\nTrue weight decay: {self.true_wd}'
@@ -168,8 +174,8 @@ def _get_init_state(): return {'epoch':0, 'iteration':0, 'num_batch':0}
 @dataclass
 class CallbackHandler():
     "Manage all of the registered callback objects, smoothing loss by momentum `beta`."
-    callbacks:CallbackList
-    metrics:CallbackList
+    callbacks:CallbackList=None
+    metrics:CallbackList=None
     beta:float=0.98
 
     def __post_init__(self)->None:
@@ -218,7 +224,7 @@ class CallbackHandler():
 
     def on_backward_begin(self, loss:Tensor)->None:
         "Handle gradient calculation on `loss`."
-        self.smoothener.add_value(loss.detach())
+        self.smoothener.add_value(loss.detach().cpu())
         self.state_dict['last_loss'], self.state_dict['smooth_loss'] = loss, self.smoothener.smooth
         for cb in self.callbacks:
             a = cb.on_backward_begin(**self.state_dict)
@@ -243,7 +249,7 @@ class CallbackHandler():
 
     def on_epoch_end(self, val_loss:Tensor)->bool:
         "Epoch is done, process `val_metrics`."
-        self.state_dict['last_metrics'] = val_loss
+        self.state_dict['last_metrics'] = [val_loss] if val_loss is not None else None
         self.state_dict['epoch'] += 1
         if not self.state_dict['train']:
             for met in self.metrics:
@@ -258,14 +264,17 @@ class CallbackHandler():
 class AverageMetric(Callback):
     "Wrap a `func` in a callback for metrics computation."
     def __init__(self, func):
-        self.func, self.name = func, func.__name__
+        # If it's a partial, use func.func
+        name = getattr(func,'func',func).__name__
+        self.func, self.name = func, name
 
     def on_epoch_begin(self, **kwargs):
         self.val, self.count = 0.,0
 
     def on_batch_end(self, last_output, last_target, train, **kwargs):
-        self.count += last_target.size(0)
-        self.val += last_target.size(0) * self.func(last_output, last_target).detach().item()
+        if not is_listy(last_target): last_target=[last_target]
+        self.count += last_target[0].size(0)
+        self.val += last_target[0].size(0) * self.func(last_output, *last_target).detach().cpu()
 
     def on_epoch_end(self, **kwargs):
         self.metric = self.val/self.count
@@ -295,7 +304,7 @@ class Stepper():
     "Used to \"step\" from start,end (`vals`) over `n_iter` iterations on a schedule defined by `func`"
     def __init__(self, vals:StartOptEnd, n_iter:int, func:Optional[AnnealFunc]=None):
         self.start,self.end = (vals[0],vals[1]) if is_tuple(vals) else (vals,0)
-        self.n_iter = n_iter
+        self.n_iter = max(1,n_iter)
         if func is None: self.func = annealing_linear if is_tuple(vals) else annealing_no
         else:          self.func = func
         self.n = 0

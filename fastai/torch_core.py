@@ -9,12 +9,12 @@ IntOrTensor = Union[int,Tensor]
 ItemsList = Collection[Union[Tensor,ItemBase,'ItemsList',float,int]]
 LambdaFunc = Callable[[Tensor],Tensor]
 LayerFunc = Callable[[nn.Module],None]
-Model = nn.Module
 ModuleList = Collection[nn.Module]
+NPArray = np.ndarray
 OptOptimizer = Optional[optim.Optimizer]
 ParamList = Collection[nn.Parameter]
 Rank0Tensor = NewType('OneEltTensor', Tensor)
-SplitFunc = Callable[[Model], List[Model]]
+SplitFunc = Callable[[nn.Module], List[nn.Module]]
 SplitFuncOrIdxList = Union[Callable, Collection[ModuleList]]
 TensorOrNumber = Union[Tensor,Number]
 TensorOrNumList = Collection[TensorOrNumber]
@@ -24,7 +24,7 @@ Tensors = Union[Tensor, Collection['Tensors']]
 Weights = Dict[str,Tensor]
 
 AffineFunc = Callable[[KWArgs], AffineMatrix]
-HookFunc = Callable[[Model, Tensors, Tensors], Any]
+HookFunc = Callable[[nn.Module, Tensors, Tensors], Any]
 LogitTensorImage = TensorImage
 LossFunction = Callable[[Tensor, Tensor], Rank0Tensor]
 MetricFunc = Callable[[Tensor,Tensor],TensorOrNumber]
@@ -38,7 +38,7 @@ PixelFunc = Callable[[TensorImage, ArgStar, KWArgs], TensorImage]
 LightingFunc = Callable[[LogitTensorImage, ArgStar, KWArgs], LogitTensorImage]
 
 fastai_types = {
-    AnnealFunc:'AnnealFunc', ArgStar:'ArgStar', BatchSamples:'BatchSamples', Classes:'Classes',
+    AnnealFunc:'AnnealFunc', ArgStar:'ArgStar', BatchSamples:'BatchSamples',
     FilePathList:'FilePathList', Floats:'Floats', ImgLabel:'ImgLabel', ImgLabels:'ImgLabels', KeyFunc:'KeyFunc',
     KWArgs:'KWArgs', ListOrItem:'ListOrItem', ListRules:'ListRules', ListSizes:'ListSizes',
     NPArrayableList:'NPArrayableList', NPArrayList:'NPArrayList', NPArrayMask:'NPArrayMask', NPImage:'NPImage',
@@ -47,7 +47,7 @@ fastai_types = {
     SplitArrayList:'SplitArrayList', StartOptEnd:'StartOptEnd', StrList:'StrList', Tokens:'Tokens',
     OptStrList:'OptStrList', AffineMatrix:'AffineMatrix', BoolOrTensor:'BoolOrTensor', FloatOrTensor:'FloatOrTensor',
     IntOrTensor:'IntOrTensor', ItemsList:'ItemsList', LambdaFunc:'LambdaFunc',
-    LayerFunc:'LayerFunc', Model:'Model', ModuleList:'ModuleList', OptOptimizer:'OptOptimizer', ParamList:'ParamList',
+    LayerFunc:'LayerFunc', ModuleList:'ModuleList', OptOptimizer:'OptOptimizer', ParamList:'ParamList',
     Rank0Tensor:'Rank0Tensor', SplitFunc:'SplitFunc', SplitFuncOrIdxList:'SplitFuncOrIdxList',
     TensorOrNumber:'TensorOrNumber', TensorOrNumList:'TensorOrNumList', TensorImage:'TensorImage',
     TensorImageSize:'TensorImageSize', Tensors:'Tensors', Weights:'Weights', AffineFunc:'AffineFunc',
@@ -57,28 +57,34 @@ fastai_types = {
 }
 
 bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
-_default_cpus = min(16, num_cpus())
-_default_device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-defaults = SimpleNamespace(device=_default_device, cpus=_default_cpus)
+defaults.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 AdamW = partial(optim.Adam, betas=(0.9,0.99))
 
-def tensor(x:Any)->Tensor:
-    "Like `torch.as_tensor`, but handle lists too"
+def tensor(x:Any, *rest)->Tensor:
+    "Like `torch.as_tensor`, but handle lists too, and can pass multiple vector elements directly"
+    if len(rest): x = (x,)+rest
+    # XXX: Pytorch bug in dataloader using num_workers>0; TODO: create repro and report
+    if is_listy(x) and len(x)==0: return tensor(0)
     return torch.tensor(x) if is_listy(x) else as_tensor(x)
 
 def np_address(x:np.ndarray)->int:
     "Address of `x` in memory"
     return x.__array_interface__['data'][0]
 
-def to_detach(b:Tensors):
-    "Recursively detach lists of tensors in `b `"
-    if is_listy(b): return [to_detach(o) for o in b]
-    return b.detach() if isinstance(b,Tensor) else b
+def to_detach(b:Tensors, cpu:bool=True):
+    "Recursively detach lists of tensors in `b `, puts them on the CPU if `cpu=True`."
+    if is_listy(b): return [to_detach(o, cpu) for o in b]
+    return (b.detach().cpu() if cpu else b.detach()) if isinstance(b,Tensor) else b
 
 def to_data(b:ItemsList):
-    "Recursively map lists of items in `b ` to their wrapped data"
+    "Recursively map lists of items in `b ` to their wrapped data."
     if is_listy(b): return [to_data(o) for o in b]
     return b.data if isinstance(b,ItemBase) else b
+
+def to_cpu(b:ItemsList):
+    "Recursively map lists of tensors in `b ` to the cpu."
+    if is_listy(b): return [to_cpu(o) for o in b]
+    return b.cpu() if isinstance(b,Tensor) else b
 
 def to_device(b:Tensors, device:torch.device):
     "Ensure `b` is on `device`."
@@ -103,7 +109,7 @@ def trainable_params(m:nn.Module)->ParamList:
     return res
 
 def children(m:nn.Module)->ModuleList:
-    "Get children of module `m`."
+    "Get children of `m`."
     return list(m.children())
 
 def num_children(m:nn.Module)->int:
@@ -114,10 +120,14 @@ def range_children(m:nn.Module)->Iterator[int]:
     "Return iterator of len of children of `m`."
     return range(num_children(m))
 
-flatten_model=lambda m: sum(map(flatten_model,m.children()),[]) if num_children(m) else [m]
+flatten_model = lambda m: sum(map(flatten_model,m.children()),[]) if num_children(m) else [m]
 def first_layer(m:nn.Module)->nn.Module:
     "Retrieve first layer in a module `m`."
     return flatten_model(m)[0]
+
+def last_layer(m:nn.Module)->nn.Module:
+    "Retrieve last layer in a module `m`."
+    return flatten_model(m)[-1]
 
 def split_model_idx(model:nn.Module, idxs:Collection[int])->ModuleList:
     "Split `model` according to the indices in `idxs`."
@@ -126,7 +136,7 @@ def split_model_idx(model:nn.Module, idxs:Collection[int])->ModuleList:
     if idxs[-1] != len(layers): idxs.append(len(layers))
     return [nn.Sequential(*layers[i:j]) for i,j in zip(idxs[:-1],idxs[1:])]
 
-def split_model(model:nn.Module, splits:Collection[Union[Model,ModuleList]], want_idxs:bool=False):
+def split_model(model:nn.Module, splits:Collection[Union[nn.Module,ModuleList]], want_idxs:bool=False):
     "Split `model` according to the layers in `splits`."
     layers = flatten_model(model)
     splits = listify(splits)
@@ -169,11 +179,15 @@ def model2half(model:nn.Module)->nn.Module:
     "Convert `model` to half precision except the batchnorm layers."
     return bn2float(model.half())
 
+def init_default(m:nn.Module, func:LayerFunc=nn.init.kaiming_normal_)->None:
+    if func:
+        if hasattr(m, 'weight'): func(m.weight)
+        if hasattr(m, 'bias') and hasattr(m.bias, 'data'): m.bias.data.fill_(0.)
+    return m
+
 def cond_init(m:nn.Module, init_func:LayerFunc):
     "Initialize the non-batchnorm layers of `m` with `init_func`"
-    if (not isinstance(m, bn_types)) and requires_grad(m):
-        if hasattr(m, 'weight'): init_func(m.weight)
-        if hasattr(m, 'bias') and hasattr(m.bias, 'data'): m.bias.data.fill_(0.)
+    if (not isinstance(m, bn_types)) and requires_grad(m): init_default(m, init_func)
 
 def apply_leaf(m:nn.Module, f:LayerFunc):
     "Apply `f` to children of `m`."
@@ -185,29 +199,88 @@ def apply_init(m, init_func:LayerFunc):
     "Initialize all non-batchnorm layers of `m` with `init_func`."
     apply_leaf(m, partial(cond_init, init_func=init_func))
 
-def in_channels(m:Model) -> List[int]:
+def in_channels(m:nn.Module) -> List[int]:
     "Return the shape of the first weight layer in `m`."
     for l in flatten_model(m):
         if hasattr(l, 'weight'): return l.weight.shape[1]
     raise Exception('No weight layer')
 
-def calc_loss(y_pred:Tensor, y_true:Tensor, loss_class:type=nn.CrossEntropyLoss, bs=64):
+def calc_loss(y_pred:Tensor, y_true:Tensor, loss_func:LossFunction):
     "Calculate loss between `y_pred` and `y_true` using `loss_class` and `bs`."
-    loss_dl = DataLoader(TensorDataset(as_tensor(y_pred),as_tensor(y_true)), bs)
-    with torch.no_grad():
-        return torch.cat([loss_class(reduction='none')(*b) for b in loss_dl])
-
-def to_np(x): return x.cpu().numpy()
+    if hasattr(loss_func, 'reduction'):
+        old_red = getattr(loss_func, 'reduction')
+        setattr(loss_func, 'reduction', 'none')
+        l = loss_func(y_pred, y_true)
+        setattr(loss_func, 'reduction', old_red)
+        return l
+    else: return loss_func(y_pred, y_true, reduction='none')
 
 def model_type(dtype):
+    "Return the torch type corresponding to `dtype`."
     return (torch.float32 if np.issubdtype(dtype, np.floating) else
             torch.int64 if np.issubdtype(dtype, np.integer)
             else None)
 
 def np2model_tensor(a):
+    "Tranform numpy array `a` to a tensor of the same type."
     dtype = model_type(a.dtype)
     res = as_tensor(a)
     if not dtype: return res
     return res.type(dtype)
 
+def _pca(x, k=2):
+    x = x-torch.mean(x,0)
+    U,S,V = torch.svd(x.t())
+    return torch.mm(x,U[:,:k])
+torch.Tensor.pca = _pca
+
 def trange_of(x): return torch.arange(len(x))
+
+def to_np(x): return x.data.cpu().numpy()
+
+# monkey patching to allow matplotlib to plot tensors
+def tensor__array__(self, dtype=None):
+    res = to_np(self)
+    if dtype is None: return res
+    else: return res.astype(dtype, copy=False)
+Tensor.__array__ = tensor__array__
+Tensor.ndim = property(lambda x: len(x.shape))
+
+class FloatItem(ItemBase):
+    def __init__(self,obj): self.data,self.obj = tensor(obj),obj
+    def __str__(self): return str(self.obj)
+
+def grab_idx(x,i,batch_first:bool=True):
+    if batch_first: return ([o[i].cpu() for o in x]   if is_listy(x) else x[i].cpu())
+    else:           return ([o[:,i].cpu() for o in x] if is_listy(x) else x[:,i].cpu())
+
+def logit(x:Tensor)->Tensor:
+    "Logit of `x`, clamped to avoid inf"
+    x = x.clamp(1e-7, 1-1e-7)
+    return -(1/x-1).log()
+
+def logit_(x:Tensor)->Tensor:
+    "Inplace logit of `x`, clamped to avoid inf"
+    x.clamp_(1e-7, 1-1e-7)
+    return (x.reciprocal_().sub_(1)).log_().neg_()
+
+def uniform(low:Number, high:Number=None, size:Optional[List[int]]=None)->FloatOrTensor:
+    "Draw 1 or shape=`size` random floats from uniform dist: min=`low`, max=`high`."
+    if high is None: high=low
+    return random.uniform(low,high) if size is None else torch.FloatTensor(*listify(size)).uniform_(low,high)
+
+def log_uniform(low, high, size:Optional[List[int]]=None)->FloatOrTensor:
+    "Draw 1 or shape=`size` random floats from uniform dist: min=log(`low`), max=log(`high`)."
+    res = uniform(log(low), log(high), size)
+    return exp(res) if size is None else res.exp_()
+
+def rand_bool(p:float, size:Optional[List[int]]=None)->BoolOrTensor:
+    "Draw 1 or shape=`size` random booleans (True occuring probability `p`)."
+    return uniform(0,1,size)<p
+
+def uniform_int(low:int, high:int, size:Optional[List[int]]=None)->IntOrTensor:
+    "Generate int or tensor `size` of ints between `low` and `high` (included)."
+    return random.randint(low,high) if size is None else torch.randint(low,high+1,size)
+
+def one_param(m: nn.Module)->Tensor: return next(m.parameters())
+

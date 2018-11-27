@@ -8,24 +8,26 @@
 
 # fastai
 
-The fastai library simplifies training fast and accurate neural nets using modern best practices. See the [fastai website](https://docs.fast.ai) to get started. The library is based on research into deep learning best practices undertaken at [fast.ai](http://www.fast.ai), and includes \"out of the box\" support for [`vision`](https://docs.fast.ai/vision.html#vision), [`text`](https://docs.fast.ai/text.html#text), [`tabular`](https://docs.fast.ai/tabular.html#tabular), and [`collab`](https://docs.fast.ai/collab.html#collab) (collaborative filtering) models. For brief examples, see the [examples](https://github.com/fastai/fastai/tree/master/examples) folder; detailed examples are provided in the full documentation. For instance, here's how to train an MNIST model using [resnet18](https://arxiv.org/abs/1512.03385) (from the [vision example](https://github.com/fastai/fastai/blob/master/examples/vision.ipynb)):
+The fastai library simplifies training fast and accurate neural nets using modern best practices. See the [fastai website](https://docs.fast.ai) to get started. The library is based on research into deep learning best practices undertaken at [fast.ai](http://www.fast.ai), and includes \"out of the box\" support for [`vision`](https://docs.fast.ai/vision.html#vision), [`text`](https://docs.fast.ai/text.html#text), [`tabular`](https://docs.fast.ai/tabular.html#tabular), and [`collab`](https://docs.fast.ai/collab.html#collab) (collaborative filtering) models. For brief examples, see the [examples](https://github.com/fastai/fastai/tree/master/examples) folder; detailed examples are provided in the full [documentation](https://docs.fast.ai/). For instance, here's how to train an MNIST model using [resnet18](https://arxiv.org/abs/1512.03385) (from the [vision example](https://github.com/fastai/fastai/blob/master/examples/vision.ipynb)):
 
 ```python
 untar_data(MNIST_PATH)
 data = image_data_from_folder(MNIST_PATH)
-learn = ConvLearner(data, tvm.resnet18, metrics=accuracy)
+learn = create_cnn(data, tvm.resnet18, metrics=accuracy)
 learn.fit(1)
 ```
 
 ## Note for [course.fast.ai](http://course.fast.ai) students
 
-If you are using `fastai` for any [course.fast.ai](http://course.fast.ai) course, you need to use `fastai 0.7.x`. Please ignore the rest of this document, which is written for `fastai 1.0.x`, and instead follow the installation instructions [here](https://forums.fast.ai/t/fastai-v0-install-issues-thread/24652).
+If you are using `fastai` for any [course.fast.ai](http://course.fast.ai) course, you need to use `fastai 0.7`. Please ignore the rest of this document, which is written for `fastai v1`, and instead follow the installation instructions [here](https://forums.fast.ai/t/fastai-v0-install-issues-thread/24652).
 
 *Note: If you want to learn how to use fastai v1 from its lead developer, Jeremy Howard, he will be teaching it in the [Deep Learning Part I](https://www.usfca.edu/data-institute/certificates/deep-learning-part-one) course at the University of San Francisco from Oct 22nd, 2018.*
 
 ## Installation
 
-`fastai-1.x` can be installed with either `conda` or `pip` package managers and also from source. At the moment you can't just run *install*, since you first need to get the correct `pytorch` version installed - thus to get `fastai-1.x` installed choose one of the installation recipes below using your favourite python package manager.
+**NB:** *fastai v1 currently supports Linux only, and requires **PyTorch v1** (currently in preview) and **Python 3.6** or later. Once pytorch v1 packages are available for Windows, we will work to support Windows as soon as possible. Since Macs don't currently have good Nvidia GPU support, we do not currently prioritize Mac development.*
+
+`fastai-1.x` can be installed with either `conda` or `pip` package managers and also from source. At the moment you can't just run *install*, since you first need to get the correct `pytorch` version installed - thus to get `fastai-1.x` installed choose one of the installation recipes below using your favourite python package manager. Note that **PyTorch v1** and **Python 3.6** are the minimal version requirements.
 
 If your system has a [recent NVIDIA card](https://www.geforce.com/hardware/technology/cuda/supported-gpus) with the correctly configured NVIDIA driver please follow the GPU installation instructions. Otherwise, the CPU-ones.
 
@@ -33,13 +35,13 @@ It's highly recommended you install `fastai` and its dependencies in a virtual e
 
 If you experience installation problems, please read about [installation issues](https://github.com/fastai/fastai/blob/master/README.md#installation-issues).
 
-
+More advanced installation issues, such as installing only partial dependencies are covered in a dedicated [installation doc](https://docs.fast.ai/installation.html).
 
 ### Conda Install
 
 * GPU
 
-   ```
+   ```bash
    conda install -c pytorch pytorch-nightly cuda92
    conda install -c fastai torchvision-nightly
    conda install -c fastai fastai
@@ -47,25 +49,35 @@ If you experience installation problems, please read about [installation issues]
 
 * CPU
 
-   ```
+   ```bash
    conda install -c pytorch pytorch-nightly-cpu
    conda install -c fastai torchvision-nightly-cpu
    conda install -c fastai fastai
    ```
+
+   On MacOS for non-GPU build install `pytorch-nightly` and `torchvision-nightly` instead of `pytorch-nightly-cpu` and `torchvision-nightly-cpu`.
+
+Note that JPEG decoding can be a bottleneck, particularly if you have a fast CPU. You can optionally install an optimized JPEG decoder as follows (Linux):
+
+```bash
+conda uninstall --force jpeg libtiff -y
+conda install -c conda-forge libjpeg-turbo
+CC="cc -mavx2" pip install --no-cache-dir -U --force-reinstall pillow-simd
+```
 
 
 ### PyPI Install
 
 * GPU
 
-   ```
+   ```bash
    pip install torch_nightly -f https://download.pytorch.org/whl/nightly/cu92/torch_nightly.html
    pip install fastai
    ```
 
 * CPU
 
-   ```
+   ```bash
    pip install torch_nightly -f https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html
    pip install fastai
    ```
@@ -79,7 +91,7 @@ NB: this set will also fetch `torchvision-nightly`, which supports `torch-1.x`.
 First, follow the instructions above for either `PyPi` or `Conda`. Then uninstall the `fastai` package using the **same package manager you used to install it**, i.e. `pip uninstall fastai` or `conda uninstall fastai`, and then, replace it with a [pip editable install](https://pip.pypa.io/en/stable/reference/pip_install/#editable-installs).
 
 
-```
+```bash
 git clone https://github.com/fastai/fastai
 cd fastai
 tools/run-after-git-clone
@@ -88,18 +100,19 @@ pip install -e .[dev]
 
 You can test that the build works by starting the jupyter notebook:
 
-```
+```bash
 jupyter notebook
 ```
 and executing an example notebook. For example load `examples/tabular.ipynb` and run it.
 
 Alternatively, you can do a quick CLI test:
 
-```
+```bash
 jupyter nbconvert --execute --ExecutePreprocessor.timeout=600 --to notebook examples/tabular.ipynb
 ```
 
 Please refer to [CONTRIBUTING.md](https://github.com/fastai/fastai/blob/master/CONTRIBUTING.md) and  [develop.md](https://github.com/fastai/fastai/blob/master/docs/develop.md) for more details on how to contribute to the `fastai` project.
+
 
 
 
@@ -111,7 +124,7 @@ If for any reason you can't use the prepackaged packages and have to build from 
 
 2. Next, you will also need to build `torchvision` from source:
 
-   ```
+   ```bash
    git clone https://github.com/pytorch/vision
    cd vision
    python setup.py install
@@ -119,7 +132,7 @@ If for any reason you can't use the prepackaged packages and have to build from 
 
 3. When both `pytorch` and `torchvision` are installed, first test that you can load each of these libraries:
 
-   ```
+   ```bash
    import torch
    import torchvision
    ```
@@ -135,7 +148,7 @@ If for any reason you can't use the prepackaged packages and have to build from 
 If the installation process fails, first make sure [your system is supported](https://github.com/fastai/fastai/blob/master/README.md#is-my-system-supported). And if the problem is still not addressed, please refer to the [troubleshooting document](https://docs-dev.fast.ai/troubleshoot.html).
 
 If you encounter installation problems with conda, make sure you have the latest `conda` client (`conda install` will do an update too):
-```
+```bash
 conda install conda
 ```
 
@@ -191,4 +204,4 @@ A detailed history of changes can be found [here](https://github.com/fastai/fast
 
 ## Copyright
 
-Copyright 2017 onwards, fast.ai, Inc. Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. A copy of the License is provided in the LICENSE file in this repository.
+Copyright 2017 onwards, fast.ai, Inc. Licensed under the Apache License, Version 2.0 (the "License"); you may not use this project's files except in compliance with the License. A copy of the License is provided in the LICENSE file in this repository.
