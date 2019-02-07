@@ -116,7 +116,7 @@ class Image(ItemBase):
                 if resize_method in (ResizeMethod.CROP,ResizeMethod.PAD):
                     x = tfm(x, size=_get_crop_target(size,mult=mult), padding_mode=padding_mode)
             else: x = tfm(x)
-        return x
+        return x.refresh()
 
     def refresh(self)->None:
         "Apply any logit, flow, or affine transfers that have been sent to the `Image`."
@@ -371,7 +371,7 @@ class ImageBBox(ImagePoints):
     def show(self, y:Image=None, ax:plt.Axes=None, figsize:tuple=(3,3), title:Optional[str]=None, hide_axis:bool=True,
         color:str='white', **kwargs):
         "Show the `ImageBBox` on `ax`."
-        if ax is None: _,ax = plt.subplot(figsize=figsize)
+        if ax is None: _,ax = plt.subplots(figsize=figsize)
         bboxes, lbls = self._compute_boxes()
         h,w = self.flow.size
         bboxes.add_(1).mul_(torch.tensor([h/2, w/2, h/2, w/2])).long()
@@ -472,7 +472,7 @@ class RandTransform():
     "Wrap `Transform` to add randomized execution."
     tfm:Transform
     kwargs:dict
-    p:int=1.0
+    p:float=1.0
     resolved:dict = field(default_factory=dict)
     do_run:bool = True
     is_random:bool = True
@@ -513,7 +513,7 @@ def _resolve_tfms(tfms:TfmList):
     "Resolve every tfm in `tfms`."
     for f in listify(tfms): f.resolve()
 
-def _grid_sample(x:TensorImage, coords:FlowField, mode:str='bilinear', padding_mode:str='reflection', **kwargs)->TensorImage:
+def _grid_sample(x:TensorImage, coords:FlowField, mode:str='bilinear', padding_mode:str='reflection', remove_out:bool=True)->TensorImage:
     "Resample pixels in `coords` from `x` by `mode`, with `padding_mode` in ('reflection','border','zeros')."
     coords = coords.flow.permute(0, 3, 1, 2).contiguous().permute(0, 2, 3, 1) # optimize layout for grid_sample
     if mode=='bilinear': # hack to get smoother downwards resampling
