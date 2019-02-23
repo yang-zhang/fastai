@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 __all__ = ['get_image_files', 'denormalize', 'get_annotations', 'ImageDataBunch',
            'ImageItemList', 'normalize', 'normalize_funcs', 'resize_to',
            'channel_view', 'mnist_stats', 'cifar_stats', 'imagenet_stats', 'download_images',
-           'verify_images', 'bb_pad_collate', 'ObjectCategoryProcessor', 'ImageToImageList',
+           'verify_images', 'bb_pad_collate', 'ImageImageList', 'PointsLabelList',
            'ObjectCategoryList', 'ObjectItemList', 'SegmentationLabelList', 'SegmentationItemList', 'PointsItemList']
 
 image_extensions = set(k for k,v in mimetypes.types_map.items() if v.startswith('image/'))
@@ -39,6 +39,7 @@ def get_annotations(fname, prefix=None):
 
 def bb_pad_collate(samples:BatchSamples, pad_idx:int=0) -> Tuple[FloatTensor, Tuple[LongTensor, LongTensor]]:
     "Function that collect `samples` of labelled bboxes and adds padding with `pad_idx`."
+    if isinstance(samples[0][1], int): return data_collate(samples)
     max_len = max([len(s[1].data[1]) for s in samples])
     bboxes = torch.zeros(len(samples), max_len, 4)
     labels = torch.zeros(len(samples), max_len).long() + pad_idx
@@ -46,16 +47,19 @@ def bb_pad_collate(samples:BatchSamples, pad_idx:int=0) -> Tuple[FloatTensor, Tu
     for i,s in enumerate(samples):
         imgs.append(s[0].data[None])
         bbs, lbls = s[1].data
-        bboxes[i,-len(lbls):] = bbs
-        labels[i,-len(lbls):] = lbls
+        if not (bbs.nelement() == 0):
+            bboxes[i,-len(lbls):] = bbs
+            labels[i,-len(lbls):] = tensor(lbls)
     return torch.cat(imgs,0), (bboxes,labels)
 
 def _maybe_add_crop_pad(tfms):
-    tfm_names = [tfm.__name__ for tfm in tfms]
-    return [crop_pad()] + tfms if 'crop_pad' not in tfm_names else tfms
+    assert is_listy(tfms) and len(tfms) == 2, "Please pass a list of two lists of transforms (train and valid)."
+    tfm_names = [[tfm.__name__ for tfm in o] for o in tfms]
+    return [([crop_pad()] + o if 'crop_pad' not in n else o) for o,n in zip(tfms, tfm_names)]
 
-def _prep_tfm_kwargs(tfms, kwargs):
-    default_rsz = ResizeMethod.SQUISH if ('size' in kwargs and is_listy(kwargs['size'])) else ResizeMethod.CROP
+def _prep_tfm_kwargs(tfms, size, kwargs):
+    tfms = ifnone(tfms, [[],[]])
+    default_rsz = ResizeMethod.SQUISH if (size is not None and is_listy(size)) else ResizeMethod.CROP
     resize_method = ifnone(kwargs.get('resize_method', default_rsz), default_rsz)
     if resize_method <= 2: tfms = _maybe_add_crop_pad(tfms)
     kwargs['resize_method'] = resize_method
@@ -65,23 +69,23 @@ def normalize(x:TensorImage, mean:FloatTensor,std:FloatTensor)->TensorImage:
     "Normalize `x` with `mean` and `std`."
     return (x-mean[...,None,None]) / std[...,None,None]
 
-def denormalize(x:TensorImage, mean:FloatTensor,std:FloatTensor)->TensorImage:
+def denormalize(x:TensorImage, mean:FloatTensor,std:FloatTensor, do_x:bool=True)->TensorImage:
     "Denormalize `x` with `mean` and `std`."
-    return x.cpu()*std[...,None,None] + mean[...,None,None]
+    return x.cpu()*std[...,None,None] + mean[...,None,None] if do_x else x.cpu()
 
-def _normalize_batch(b:Tuple[Tensor,Tensor], mean:FloatTensor, std:FloatTensor, do_y:bool=False)->Tuple[Tensor,Tensor]:
+def _normalize_batch(b:Tuple[Tensor,Tensor], mean:FloatTensor, std:FloatTensor, do_x:bool=True, do_y:bool=False)->Tuple[Tensor,Tensor]:
     "`b` = `x`,`y` - normalize `x` array of imgs and `do_y` optionally `y`."
     x,y = b
     mean,std = mean.to(x.device),std.to(x.device)
-    x = normalize(x,mean,std)
+    if do_x: x = normalize(x,mean,std)
     if do_y and len(y.shape) == 4: y = normalize(y,mean,std)
     return x,y
 
-def normalize_funcs(mean:FloatTensor, std:FloatTensor, do_y:bool=False)->Tuple[Callable,Callable]:
+def normalize_funcs(mean:FloatTensor, std:FloatTensor, do_x:bool=True, do_y:bool=False)->Tuple[Callable,Callable]:
     "Create normalize/denormalize func using `mean` and `std`, can specify `do_y` and `device`."
     mean,std = tensor(mean),tensor(std)
-    return (partial(_normalize_batch, mean=mean, std=std, do_y=do_y),
-            partial(denormalize,      mean=mean, std=std))
+    return (partial(_normalize_batch, mean=mean, std=std, do_x=do_x, do_y=do_y),
+            partial(denormalize,      mean=mean, std=std, do_x=do_x))
 
 cifar_stats = ([0.491, 0.482, 0.447], [0.247, 0.243, 0.261])
 imagenet_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -92,15 +96,19 @@ def channel_view(x:Tensor)->Tensor:
     return x.transpose(0,1).contiguous().view(x.shape[1],-1)
 
 class ImageDataBunch(DataBunch):
+    "DataBunch suitable for computer vision."
     _square_show = True
 
     @classmethod
-    def create_from_ll(cls, dss:LabelLists, bs:int=64, ds_tfms:Optional[TfmList]=None,
-                num_workers:int=defaults.cpus, tfms:Optional[Collection[Callable]]=None, device:torch.device=None,
-                test:Optional[PathOrStr]=None, collate_fn:Callable=data_collate, size:int=None, **kwargs)->'ImageDataBunch':
-        dss = dss.transform(tfms=ds_tfms, size=size, **kwargs)
-        if test is not None: dss.add_test_folder(test)
-        return dss.databunch(bs=bs, tfms=tfms, num_workers=num_workers, collate_fn=collate_fn, device=device)
+    def create_from_ll(cls, lls:LabelLists, bs:int=64, ds_tfms:Optional[TfmList]=None,
+                num_workers:int=defaults.cpus, dl_tfms:Optional[Collection[Callable]]=None, device:torch.device=None,
+                test:Optional[PathOrStr]=None, collate_fn:Callable=data_collate, size:int=None, no_check:bool=False, 
+                **kwargs)->'ImageDataBunch':
+        "Create an `ImageDataBunch` from `LabelLists` `lls` with potential `ds_tfms`."
+        ds_tfms, kwargs = _prep_tfm_kwargs(ds_tfms, size, kwargs)
+        lls = lls.transform(tfms=ds_tfms, size=size, **kwargs)
+        if test is not None: lls.add_test_folder(test)
+        return lls.databunch(bs=bs, dl_tfms=dl_tfms, num_workers=num_workers, collate_fn=collate_fn, device=device, no_check=no_check)
 
     @classmethod
     def from_folder(cls, path:PathOrStr, train:PathOrStr='train', valid:PathOrStr='valid',
@@ -114,40 +122,53 @@ class ImageDataBunch(DataBunch):
         return cls.create_from_ll(src, **kwargs)
 
     @classmethod
-    def from_df(cls, path:PathOrStr, df:pd.DataFrame, folder:PathOrStr='.', sep=None, valid_pct:float=0.2,
-                fn_col:IntsOrStrs=0, label_col:IntsOrStrs=1, suffix:str='',
-                **kwargs:Any)->'ImageDataBunch':
-        "Create from a DataFrame."
+    def from_df(cls, path:PathOrStr, df:pd.DataFrame, folder:PathOrStr=None, label_delim:str=None, valid_pct:float=0.2,
+                fn_col:IntsOrStrs=0, label_col:IntsOrStrs=1, suffix:str='', **kwargs:Any)->'ImageDataBunch':
+        "Create from a `DataFrame` `df`."
         src = (ImageItemList.from_df(df, path=path, folder=folder, suffix=suffix, cols=fn_col)
                 .random_split_by_pct(valid_pct)
-                .label_from_df(sep=sep, cols=label_col))
+                .label_from_df(label_delim=label_delim, cols=label_col))
         return cls.create_from_ll(src, **kwargs)
 
     @classmethod
-    def from_csv(cls, path:PathOrStr, folder:PathOrStr='.', sep=None, csv_labels:PathOrStr='labels.csv', valid_pct:float=0.2,
-            fn_col:int=0, label_col:int=1, suffix:str='',
-            header:Optional[Union[int,str]]='infer', **kwargs:Any)->'ImageDataBunch':
-        "Create from a csv file."
+    def from_csv(cls, path:PathOrStr, folder:PathOrStr=None, label_delim:str=None, csv_labels:PathOrStr='labels.csv',
+                 valid_pct:float=0.2, fn_col:int=0, label_col:int=1, suffix:str='', header:Optional[Union[int,str]]='infer',
+                 **kwargs:Any)->'ImageDataBunch':
+        "Create from a csv file in `path/csv_labels`."
         path = Path(path)
         df = pd.read_csv(path/csv_labels, header=header)
-        return cls.from_df(path, df, folder=folder, sep=sep, valid_pct=valid_pct,
-                fn_col=fn_col, label_col=label_col, suffix=suffix, header=header, **kwargs)
+        return cls.from_df(path, df, folder=folder, label_delim=label_delim, valid_pct=valid_pct,
+                fn_col=fn_col, label_col=label_col, suffix=suffix, **kwargs)
 
     @classmethod
     def from_lists(cls, path:PathOrStr, fnames:FilePathList, labels:Collection[str], valid_pct:float=0.2, **kwargs):
-        src = ImageItemList(fnames, path=path).random_split_by_pct(valid_pct).label_from_list(labels)
+        "Create from list of `fnames` in `path`."
+        fname2label = {f:l for (f,l) in zip(fnames, labels)}
+        src = ImageItemList(fnames, path=path).random_split_by_pct(valid_pct).label_from_func(lambda x:fname2label[x])
         return cls.create_from_ll(src, **kwargs)
 
     @classmethod
     def from_name_func(cls, path:PathOrStr, fnames:FilePathList, label_func:Callable, valid_pct:float=0.2, **kwargs):
+        "Create from list of `fnames` in `path` with `label_func`."
         src = ImageItemList(fnames, path=path).random_split_by_pct(valid_pct)
         return cls.create_from_ll(src.label_from_func(label_func), **kwargs)
 
     @classmethod
     def from_name_re(cls, path:PathOrStr, fnames:FilePathList, pat:str, valid_pct:float=0.2, **kwargs):
+        "Create from list of `fnames` in `path` with re expression `pat`."
         pat = re.compile(pat)
-        def _get_label(fn): return pat.search(str(fn)).group(1)
+        def _get_label(fn): 
+            if isinstance(fn, Path): fn = fn.as_posix()
+            return pat.search(str(fn)).group(1)
         return cls.from_name_func(path, fnames, _get_label, valid_pct=valid_pct, **kwargs)
+
+    @staticmethod
+    def single_from_classes(path:Union[Path, str], classes:Collection[str], ds_tfms:TfmList=None, **kwargs):
+        "Create an empty `ImageDataBunch` in `path` with `classes`. Typically used for inference."
+        warn("""This method is deprecated and will be removed in a future version, use `load_learner` after
+             `Learner.export()`""", DeprecationWarning)
+        sd = ImageItemList([], path=path, ignore_empty=True).no_split()
+        return sd.label_const(0, label_cls=CategoryList, classes=classes).transform(ds_tfms, **kwargs).databunch()
 
     def batch_stats(self, funcs:Collection[Callable]=None)->Tensor:
         "Grab a batch of data and call reduction function `func` per channel"
@@ -155,12 +176,12 @@ class ImageDataBunch(DataBunch):
         x = self.one_batch(ds_type=DatasetType.Valid, denorm=False)[0].cpu()
         return [func(channel_view(x), 1) for func in funcs]
 
-    def normalize(self, stats:Collection[Tensor]=None, do_y:bool=None)->None:
+    def normalize(self, stats:Collection[Tensor]=None, do_x:bool=True, do_y:bool=False)->None:
         "Add normalize transform using `stats` (defaults to `DataBunch.batch_stats`)"
         if getattr(self,'norm',False): raise Exception('Can not call normalize twice')
         if stats is None: self.stats = self.batch_stats()
         else:             self.stats = stats
-        self.norm,self.denorm = normalize_funcs(*self.stats, do_y=do_y)
+        self.norm,self.denorm = normalize_funcs(*self.stats, do_x=do_x, do_y=do_y)
         self.add_tfm(self.norm)
         return self
 
@@ -189,13 +210,7 @@ def resize_to(img, targ_sz:int, use_min:bool=False):
 
 def verify_image(file:Path, idx:int, delete:bool, max_size:Union[int,Tuple[int,int]]=None, dest:Path=None, n_channels:int=3,
                  interp=PIL.Image.BILINEAR, ext:str=None, img_format:str=None, resume:bool=False, **kwargs):
-    """Check if the image in `file` exists, it can be opened and has `n_channels`.
-    If `delete=True`:
-    (1) removes `file` if any of the verifications fails
-    (2) saves a modified version of `file` w/o EXIF data if the latter is broken
-    If `max_size` is specifided, image is resized to the same ratio so that both sizes are less than `max_size`,
-    using `interp`. Result is stored in `dest`, `ext` forces an extension type, `img_format` and `kwargs` are passed
-    to PIL.Image.save."""
+    "Check if the image in `file` exists, maybe resize it and copy it in `dest`."
     try:
         # deal with partially broken images as indicated by PIL warnings
         with warnings.catch_warnings():
@@ -225,7 +240,7 @@ def verify_image(file:Path, idx:int, delete:bool, max_size:Union[int,Tuple[int,i
             img.save(dest_fname, img_format, **kwargs)
         img = np.array(img)
         img_channels = 1 if len(img.shape) == 2 else img.shape[2]
-        assert img_channels == n_channels, f"Image {file} has {img_channels} instead of {n_channels}"
+        assert img_channels == n_channels, f"Image {file} has {img_channels} instead of {n_channels} channels"
     except Exception as e:
         print(f'{e}')
         if delete: file.unlink()
@@ -233,12 +248,7 @@ def verify_image(file:Path, idx:int, delete:bool, max_size:Union[int,Tuple[int,i
 def verify_images(path:PathOrStr, delete:bool=True, max_workers:int=4, max_size:Union[int]=None,
                   dest:PathOrStr='.', n_channels:int=3, interp=PIL.Image.BILINEAR, ext:str=None, img_format:str=None,
                   resume:bool=None, **kwargs):
-    """Check if the image in `path` exists, can be opened and has `n_channels`.
-    If `n_channels` is 3 – it'll try to convert image to RGB. If `delete`, removes it if it fails.
-    If `resume` – it will skip already existent images in `dest`.  If `max_size` is specifided,
-    image is resized to the same ratio so that both sizes are less than `max_size`, using `interp`.
-    Result is stored in `dest`, `ext` forces an extension type, `img_format` and `kwargs` are
-    passed to PIL.Image.save. Use `max_workers` CPUs."""
+    "Check if the images in `path` aren't broken, maybe resize them and copy it in `dest`."
     path = Path(path)
     if resume is None and dest == '.': resume=False
     dest = path/Path(dest)
@@ -249,12 +259,17 @@ def verify_images(path:PathOrStr, delete:bool=True, max_workers:int=4, max_size:
     parallel(func, files, max_workers=max_workers)
 
 class ImageItemList(ItemList):
-    _bunch = ImageDataBunch
-    def __post_init__(self):
-        super().__post_init__()
+    "`ItemList` suitable for computer vision."
+    _bunch,_square_show,_square_show_res = ImageDataBunch,True,True
+    def __init__(self, *args, convert_mode='RGB', **kwargs):
+        super().__init__(*args, **kwargs)
+        self.convert_mode = convert_mode
+        self.copy_new.append('convert_mode')
         self.sizes={}
 
-    def open(self, fn): return open_image(fn)
+    def open(self, fn):
+        "Open image in `fn`, subclass and overwrite for custom behavior."
+        return open_image(fn, convert_mode=self.convert_mode)
 
     def get(self, i):
         fn = super().get(i)
@@ -269,23 +284,49 @@ class ImageItemList(ItemList):
         return super().from_folder(path=path, extensions=extensions, **kwargs)
 
     @classmethod
-    def from_df(cls, df:DataFrame, path:PathOrStr, cols:IntsOrStrs=0, folder:PathOrStr='.', suffix:str='', **kwargs)->'ItemList':
-        "Get the filenames in `col` of `df` and will had `path/folder` in front of them, `suffix` at the end."
+    def from_df(cls, df:DataFrame, path:PathOrStr, cols:IntsOrStrs=0, folder:PathOrStr=None, suffix:str='', **kwargs)->'ItemList':
+        "Get the filenames in `col` of `df` and will had `folder` in front of them, `suffix` at the end."
         suffix = suffix or ''
         res = super().from_df(df, path=path, cols=cols, **kwargs)
-        res.items = np.char.add(np.char.add(f'{folder}/', res.items.astype(str)), suffix)
-        res.items = np.char.add(f'{res.path}/', res.items)
+        pref = f'{res.path}{os.path.sep}'
+        if folder is not None: pref += f'{folder}{os.path.sep}'
+        res.items = np.char.add(np.char.add(pref, res.items.astype(str)), suffix)
         return res
 
     @classmethod
     def from_csv(cls, path:PathOrStr, csv_name:str, header:str='infer', **kwargs)->'ItemList':
+        "Get the filenames in `path/csv_name` opened with `header`."
         path = Path(path)
         df = pd.read_csv(path/csv_name, header=header)
         return cls.from_df(df, path=path, **kwargs)
 
-    def reconstruct(self, t:Tensor): return Image(t)
+    def reconstruct(self, t:Tensor): return Image(t.clamp(min=0,max=1))
+
+    def show_xys(self, xs, ys, imgsize:int=4, figsize:Optional[Tuple[int,int]]=None, **kwargs):
+        "Show the `xs` (inputs) and `ys` (targets) on a figure of `figsize`."
+        rows = int(np.ceil(math.sqrt(len(xs))))
+        axs = subplots(rows, rows, imgsize=imgsize, figsize=figsize)
+        for x,y,ax in zip(xs, ys, axs.flatten()): x.show(ax=ax, y=y, **kwargs)
+        for ax in axs.flatten()[len(xs):]: ax.axis('off')
+        plt.tight_layout()
+
+    def show_xyzs(self, xs, ys, zs, imgsize:int=4, figsize:Optional[Tuple[int,int]]=None, **kwargs):
+        "Show `xs` (inputs), `ys` (targets) and `zs` (predictions) on a figure of `figsize`."
+        if self._square_show_res:
+            title = 'Ground truth\nPredictions'
+            rows = int(np.ceil(math.sqrt(len(xs))))
+            axs = subplots(rows, rows, imgsize=imgsize, figsize=figsize, title=title, weight='bold', size=12)
+            for x,y,z,ax in zip(xs,ys,zs,axs.flatten()): x.show(ax=ax, title=f'{str(y)}\n{str(z)}', **kwargs)
+            for ax in axs.flatten()[len(xs):]: ax.axis('off')
+        else:
+            title = 'Ground truth/Predictions'
+            axs = subplots(len(xs), 2, imgsize=imgsize, figsize=figsize, title=title, weight='bold', size=14)
+            for i,(x,y,z) in enumerate(zip(xs,ys,zs)):
+                x.show(ax=axs[i,0], y=y, **kwargs)
+                x.show(ax=axs[i,1], y=z, **kwargs)
 
 class ObjectCategoryProcessor(MultiCategoryProcessor):
+    "`PreProcessor` for labelled bounding boxes."
     def __init__(self, ds:ItemList, pad_idx:int=0):
         self.pad_idx = pad_idx
         super().__init__(ds)
@@ -297,6 +338,7 @@ class ObjectCategoryProcessor(MultiCategoryProcessor):
     def process_one(self,item): return [item[0], [self.c2i.get(o,None) for o in item[1]]]
 
     def generate_classes(self, items):
+        "Generate classes from unique `items` and add `background`."
         classes = super().generate_classes([o[1] for o in items])
         classes = ['background'] + list(classes)
         return classes
@@ -310,44 +352,53 @@ def _get_size(xs,i):
     return size
 
 class ObjectCategoryList(MultiCategoryList):
+    "`ItemList` for labelled bounding boxes."
     _processor = ObjectCategoryProcessor
 
     def get(self, i):
         return ImageBBox.create(*_get_size(self.x,i), *self.items[i], classes=self.classes, pad_idx=self.pad_idx)
-
+    
+    def analyze_pred(self, pred): return pred
+    
     def reconstruct(self, t, x):
-        bboxes, labels = t
+        (bboxes, labels) = t
         if len((labels - self.pad_idx).nonzero()) == 0: return
         i = (labels - self.pad_idx).nonzero().min()
         bboxes,labels = bboxes[i:],labels[i:]
         return ImageBBox.create(*x.size, bboxes, labels=labels, classes=self.classes, scale=False)
 
-class ObjectItemList(ImageItemList): _label_cls = ObjectCategoryList
+class ObjectItemList(ImageItemList):
+    "`ItemList` suitable for object detection."
+    _label_cls,_square_show_res = ObjectCategoryList,False
 
 class SegmentationProcessor(PreProcessor):
+    "`PreProcessor` that stores the classes for segmentation."
     def __init__(self, ds:ItemList): self.classes = ds.classes
     def process(self, ds:ItemList):  ds.classes,ds.c = self.classes,len(self.classes)
 
 class SegmentationLabelList(ImageItemList):
+    "`ItemList` for segmentation masks."
     _processor=SegmentationProcessor
     def __init__(self, items:Iterator, classes:Collection=None, **kwargs):
         super().__init__(items, **kwargs)
-        self.classes,self.loss_func = classes,CrossEntropyFlat()
-
-    def new(self, items, classes=None, **kwargs):
-        return self.__class__(items, ifnone(classes, self.classes), **kwargs)
+        self.copy_new.append('classes')
+        self.classes,self.loss_func = classes,CrossEntropyFlat(axis=1)
 
     def open(self, fn): return open_mask(fn)
     def analyze_pred(self, pred, thresh:float=0.5): return pred.argmax(dim=0)[None]
     def reconstruct(self, t:Tensor): return ImageSegment(t)
 
-class SegmentationItemList(ImageItemList): _label_cls = SegmentationLabelList
+class SegmentationItemList(ImageItemList):
+    "`ItemList` suitable for segmentation tasks."
+    _label_cls,_square_show_res = SegmentationLabelList,False
 
 class PointsProcessor(PreProcessor):
+    "`PreProcessor` that stores the number of targets for point regression."
     def __init__(self, ds:ItemList): self.c = len(ds.items[0].reshape(-1))
     def process(self, ds:ItemList):  ds.c = self.c
 
-class PointsItemList(ItemList):
+class PointsLabelList(ItemList):
+    "`ItemList` for points."
     _processor = PointsProcessor
 
     def __post_init__(self): self.loss_func = MSELossFlat()
@@ -359,5 +410,27 @@ class PointsItemList(ItemList):
     def analyze_pred(self, pred, thresh:float=0.5): return pred.view(-1,2)
     def reconstruct(self, t, x): return ImagePoints(FlowField(x.size, t), scale=False)
 
-class ImageToImageList(ImageItemList): _label_cls = ImageItemList
+class PointsItemList(ImageItemList):
+    "`ItemList` for `Image` to `ImagePoints` tasks."
+    _label_cls,_square_show_res = PointsLabelList,False
 
+class ImageImageList(ImageItemList):
+    "`ItemList` suitable for `Image` to `Image` tasks."
+    _label_cls,_square_show,_square_show_res = ImageItemList,False,False
+
+    def show_xys(self, xs, ys, imgsize:int=4, figsize:Optional[Tuple[int,int]]=None, **kwargs):
+        "Show the `xs` (inputs) and `ys`(targets)  on a figure of `figsize`."
+        axs = subplots(len(xs), 2, imgsize=imgsize, figsize=figsize)
+        for i, (x,y) in enumerate(zip(xs,ys)):
+            x.show(ax=axs[i,0], **kwargs)
+            y.show(ax=axs[i,1], **kwargs)
+        plt.tight_layout()
+
+    def show_xyzs(self, xs, ys, zs, imgsize:int=4, figsize:Optional[Tuple[int,int]]=None, **kwargs):
+        "Show `xs` (inputs), `ys` (targets) and `zs` (predictions) on a figure of `figsize`."
+        title = 'Input / Prediction / Target'
+        axs = subplots(len(xs), 3, imgsize=imgsize, figsize=figsize, title=title, weight='bold', size=14)
+        for i,(x,y,z) in enumerate(zip(xs,ys,zs)):
+            x.show(ax=axs[i,0], **kwargs)
+            y.show(ax=axs[i,2], **kwargs)
+            z.show(ax=axs[i,1], **kwargs)
