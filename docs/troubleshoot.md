@@ -34,7 +34,7 @@ If you have `nvidia-smi` working and `pytorch` still can't recognize your NVIDIA
 
    Note, not remove, but purge! purge in addition to removing the package, also removes package-specific configuration and any other files that were created by it.
 
-2. Once you uninstalled the old drivers, make sure you don't have any orphaned NVIDIA drivers on your system remaining from manual installs. Usually it's enough to run:
+2. Once you uninstalled the old drivers, make sure you don't have any orphaned NVIDIA drivers on your system remaining from manual installs. Usually, it's enough to run:
 
    ```
    find /usr/ | grep libcuda.so
@@ -443,11 +443,13 @@ There is a particular issue with this error is that under ipython/jupyter notebo
 #memory-leakage-on-exception).
 
 
-### cuda runtime error (59) : device-side assert triggered
+### device-side assert triggered
 
 CUDA's default environment allows sending commands to GPU in asynchronous mode - i.e. without waiting to check whether they were successful, thus tremendously speeding up the execution. The side effect is that if anything goes wrong, the context is gone and it's impossible to tell what the error was. That's when you get this generic error, which means that something went wrong on the GPU, but the program can't tell what.
 
-To debug this issue, the non-blocking CUDA mode needs to be turned off, which will slow everything down, but you will get the proper error message. You can accomplish that using several approaches:
+Moreover, the only way to recover from it is to restart the kernel. Other programs and kernels will still be able to use the card, so it only affects the kernel/program the error happened in.
+
+To debug this issue, the non-blocking CUDA mode needs to be turned off, which will slow everything down, but you will get the proper error message, albeit, it will still be unrecoverable. You can accomplish that using several approaches:
 
 * create a cell at the very top of the notebook.
    ```
@@ -473,6 +475,19 @@ Of course, if you're not using `jupyter notebook` then you can just set the env 
    ```
    CUDA_LAUNCH_BLOCKING=1 my_pytorch_script.py
    ```
+
+### cuda runtime error (11) : invalid argument
+
+If you get an error:
+```
+RuntimeError: cuda runtime error (11) : invalid argument at .../src/THC/THCGeneral.cpp
+```
+it's possible that your pytorch build doesn't support the NVIDIA Driver you have installed.
+
+For example, you may have a newer NVIDIA driver with an older pytorch CUDA build, which most of the time should work, as it should be backward compatible, but that is not always the case. So make sure that if you run a recent NVIDIA driver you install pytorch that is built against the latest CUDA version. Follow the instructions [here](https://pytorch.org/get-started/locally/).
+
+You will find the table of different CUDA versions and their NVDIA driver counterparts [here](https://github.com/fastai/fastai/blob/master/README.md#is-my-system-supported).
+
 
 
 ## Memory Leakage On Exception
@@ -505,8 +520,11 @@ The rest of this section covers a variety of solutions for this problem.
 
 `fastai > 1.0.41` has been instrumented with the following features that will provide you a solution to this problem:
 
-1.  under non-ipython environment it doesn't do anything special
-2. under ipython it strips tb by default only for the "CUDA out of memory" exception, i.e. `%debug` magic will work under all circumstances but this one, and it'll leak memory in all of those until tb is reset
+1. under non-ipython environment it doesn't do anything special
+2. under ipython it strips tb by default only for the following exceptions:
+   * "CUDA out of memory"
+   * "device-side assert triggered"
+   that is the `%debug` magic will work under all other exceptions, and it'll leak memory until tb is reset.
 3.  The env var ` FASTAI_TB_CLEAR_FRAMES` changes this behavior when run under ipython,
 depending on its value:
 

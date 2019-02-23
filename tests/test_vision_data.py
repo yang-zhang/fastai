@@ -1,12 +1,18 @@
 import pytest
 from fastai.vision import *
 from fastai.vision.data import verify_image
+from utils.text import *
 import PIL
 import responses
 
 @pytest.fixture(scope="module")
 def path():
     path = untar_data(URLs.MNIST_TINY)
+    return path
+
+@pytest.fixture(scope="module")
+def path_var_size():
+    path = untar_data(URLs.MNIST_VAR_SIZE_TINY)
     return path
 
 def mnist_tiny_sanity_test(data):
@@ -22,7 +28,7 @@ def test_from_folder(path):
         mnist_tiny_sanity_test(data)
 
 def test_from_name_re(path):
-    fnames = get_files(path/'train', recurse=True)
+    fnames = get_image_files(path/'train', recurse=True)
     pat = r'/([^/]+)\/\d+.png$'
     data = ImageDataBunch.from_name_re(path, fnames, pat, ds_tfms=(rand_pad(2, 28), []))
     mnist_tiny_sanity_test(data)
@@ -40,13 +46,51 @@ def test_from_lists(path):
     current_labels = [int(str(l)) for l in data.valid_ds.y]
     assert len(expected_labels) == len(current_labels)
     assert np.all(np.array(expected_labels) == np.array(current_labels))
-    
+
 def test_from_csv_and_from_df(path):
     for func in ['from_csv', 'from_df']:
         files = []
         if func is 'from_df': data = ImageDataBunch.from_df(path, df=pd.read_csv(path/'labels.csv'), size=28)
         else: data = ImageDataBunch.from_csv(path, size=28)
         mnist_tiny_sanity_test(data)
+
+rms = ['PAD', 'CROP', 'SQUISH']
+
+def check_resized(data, size, args):
+    x,_ = data.train_ds[0]
+    size_want = (size, size) if isinstance(size, int) else size
+    size_real = x.size
+    assert size_want == size_real, f"[{args}]: size mismatch after resize {size} expected {size_want}, got {size_real}"
+
+def test_image_resize(path, path_var_size):
+    # in this test the 2 datasets are:
+    # (1) 28x28,
+    # (2) var-size but larger than 28x28,
+    # and the resizes are always less than 28x28, so it always tests a real resize
+    for p in [path, path_var_size]: # identical + var sized inputs
+        fnames = get_image_files(p/'train', recurse=True)
+        pat = r'/([^/]+)\/\d+.png$'
+        for size in [14, (14,14), (14,20)]:
+            for rm_name in rms:
+                rm = getattr(ResizeMethod, rm_name)
+                args = f"path={p}, size={size}, resize_method={rm_name}"
+
+                # resize the factory method way
+                with CaptureStderr() as cs:
+                    data = ImageDataBunch.from_name_re(p, fnames, pat, ds_tfms=None, size=size, resize_method=rm)
+                assert len(cs.err)==0, f"[{args}]: got collate_fn warning {cs.err}"
+                check_resized(data, size, args)
+
+                # resize the data block way
+                with CaptureStderr() as cs:
+                    data = (ImageItemList.from_folder(p)
+                            .no_split()
+                            .label_from_folder()
+                            .transform(size=size, resize_method=rm)
+                            .databunch(bs=2)
+                            )
+                assert len(cs.err)==0, f"[{args}]: got collate_fn warning {cs.err}"
+                check_resized(data, size, args)
 
 def test_multi_iter_broken(path):
     data = ImageDataBunch.from_folder(path, ds_tfms=(rand_pad(2, 28), []))

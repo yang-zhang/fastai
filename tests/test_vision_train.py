@@ -4,6 +4,7 @@ from fastai.callbacks import *
 from fastai.utils.mem import *
 from utils.mem import *
 from math import isclose
+from fastai.train import ClassificationInterpretation
 
 use_gpu = torch.cuda.is_available()
 torch_preload_mem()
@@ -119,9 +120,19 @@ def test_model_load_mem_leak(learn_large_unfit):
     # XXX: not sure where 6MB get lost still but for now it's a small leak - need to test with a bigger model
     assert isclose(used_before, used_after_reclaimed, abs_tol=6),f"load() and used GPU RAM: before load(): {used_before}, after: {used_after}, after gc.collect() {used_after_reclaimed} used"
 
-@pytest.mark.slow
 @pytest.mark.parametrize('arch', [models.resnet18, models.squeezenet1_1])
 def test_models_meta(mnist_tiny, arch, zero_image):
     learn = create_cnn(mnist_tiny, arch, metrics=[accuracy, error_rate])
     pred = learn.predict(zero_image)
     assert pred is not None
+
+def test_ClassificationInterpretation(learn):
+    interp = ClassificationInterpretation.from_learner(learn)
+    assert isinstance(interp.confusion_matrix(), (np.ndarray))
+    assert interp.confusion_matrix().sum() == len(learn.data.valid_ds)
+    conf = interp.most_confused()
+    expect = {'3', '7'}
+    assert (len(conf) == 0 or
+            len(conf) == 1 and (set(conf[0][:2]) == expect) or
+            len(conf) == 2 and (set(conf[0][:2]) == set(conf[1][:2]) == expect)
+    ), f"conf={conf}"

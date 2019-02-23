@@ -72,7 +72,7 @@ def _flip_affine() -> TfmAffine:
             [0,  0, 1.]]
 flip_affine = TfmAffine(_flip_affine)
 
-def _dihedral(x, k:partial(uniform_int,0,8)):
+def _dihedral(x, k:partial(uniform_int,0,7)):
     "Randomly flip `x` image based on `k`."
     flips=[]
     if k&1: flips.append(1)
@@ -82,7 +82,7 @@ def _dihedral(x, k:partial(uniform_int,0,8)):
     return x.contiguous()
 dihedral = TfmPixel(_dihedral)
 
-def _dihedral_affine(k:partial(uniform_int,0,8)):
+def _dihedral_affine(k:partial(uniform_int,0,7)):
     "Randomly flip `x` image based on `k`."
     x = -1 if k&1 else 1
     y = -1 if k&2 else 1
@@ -192,6 +192,11 @@ def _crop_pad(x, size, padding_mode='reflection', row_pct:uniform = 0.5, col_pct
 
 crop_pad = TfmCrop(_crop_pad)
 
+def _image_maybe_add_crop_pad(img, tfms):
+    tfm_names = [tfm.__name__ for tfm in tfms]
+    return [crop_pad()] + tfms if 'crop_pad' not in tfm_names else tfms
+Image._maybe_add_crop_pad = _image_maybe_add_crop_pad
+
 rand_pos = {'row_pct':(0,1), 'col_pct':(0,1)}
 
 def rand_pad(padding:int, size:int, mode:str='reflection'):
@@ -199,13 +204,13 @@ def rand_pad(padding:int, size:int, mode:str='reflection'):
     return [pad(padding=padding,mode=mode),
             crop(size=size, **rand_pos)]
 
-def rand_zoom(*args, **kwargs):
+def rand_zoom(scale:uniform=1.0, p:float=1.):
     "Randomized version of `zoom`."
-    return zoom(*args, **rand_pos, **kwargs)
+    return zoom(scale=scale, **rand_pos, p=p)
 
-def rand_crop(*args, **kwargs):
+def rand_crop(*args, padding_mode='reflection', p:float=1.):
     "Randomized version of `crop_pad`."
-    return crop_pad(*args, **rand_pos, **kwargs)
+    return crop_pad(*args, **rand_pos, padding_mode=padding_mode, p=p)
 
 def zoom_crop(scale:float, do_rand:bool=False, p:float=1.0):
     "Randomly zoom and/or crop."
