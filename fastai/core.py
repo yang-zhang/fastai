@@ -46,7 +46,7 @@ def num_cpus()->int:
     except AttributeError: return os.cpu_count()
 
 _default_cpus = min(16, num_cpus())
-defaults = SimpleNamespace(cpus=_default_cpus, cmap='viridis')
+defaults = SimpleNamespace(cpus=_default_cpus, cmap='viridis', return_fig=False)
 
 def is_listy(x:Any)->bool: return isinstance(x, (tuple,list))
 def is_tuple(x:Any)->bool: return isinstance(x, tuple)
@@ -76,7 +76,7 @@ def uniqueify(x:Series, sort:bool=False)->List:
     if sort: res.sort()
     return res
 
-def idx_dict(a): 
+def idx_dict(a):
     "Create a dictionary value to index from `a`."
     return {v:k for k,v in enumerate(a)}
 
@@ -148,7 +148,6 @@ TfmList = Union[Callable, Collection[Callable]]
 class ItemBase():
     "Base item type in the fastai library."
     def __init__(self, data:Any): self.data=self.obj=data
-    def __repr__(self): return f'{self.__class__.__name__} {self}'
     def show(self, ax:plt.Axes, **kwargs):
         "Subclass this method if you want to customize the way this `ItemBase` is shown on `ax`."
         ax.set_title(str(self))
@@ -190,10 +189,10 @@ def download_url(url:str, dest:str, overwrite:bool=False, pbar:ProgressBar=None,
             print(timeout_txt)
             import sys;sys.exit(1)
 
-def range_of(x):  
+def range_of(x):
     "Create a range from 0 to `len(x)`."
     return list(range(len(x)))
-def arange_of(x): 
+def arange_of(x):
     "Same as `range_of` but returns an array."
     return np.arange(len(x))
 
@@ -244,7 +243,7 @@ def func_args(func)->bool:
     code = func.__code__
     return code.co_varnames[:code.co_argcount]
 
-def has_arg(func, arg)->bool: 
+def has_arg(func, arg)->bool:
     "Check if `func` accepts `arg`."
     return arg in func_args(func)
 
@@ -327,3 +326,18 @@ def show_some(items:Collection, n_max:int=5, sep:str=','):
     res = sep.join([f'{o}' for o in items[:n_max]])
     if len(items) > n_max: res += '...'
     return res
+
+def get_tmp_file(dir=None):
+    "Create and return a tmp filename, optionally at a specific path. `os.remove` when done with it."
+    with tempfile.NamedTemporaryFile(delete=False, dir=dir) as f: return f.name
+
+def compose(funcs:List[Callable])->Callable:
+    "Compose `funcs`"
+    def compose_(funcs, x, *args, **kwargs):
+        for f in listify(funcs): x = f(x, *args, **kwargs)
+        return x
+    return partial(compose_, funcs)
+
+def num_distrib():
+    "Return the number of processes in distributed training (if applicable)."
+    return os.environ.get('WORLD_SIZE', 1)

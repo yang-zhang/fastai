@@ -68,7 +68,13 @@ The tests have been configured to automatically run against the `fastai` directo
 
 ### Choosing which tests to run
 
-To run all the tests:
+[Full documentation](https://docs.pytest.org/en/latest/usage.html).
+
+For nuances of configuring pytest's repo-wide behavior see [collection](https://docs.pytest.org/en/latest/example/pythoncollection.html).
+
+Here are some most useful ways of running tests.
+
+#### Run all
 
    ```
    pytest
@@ -87,23 +93,15 @@ or:
    ```
 
 
-To skip the integration tests in order to do quick testing while you work:
-
-   ```
-   pytest --skipint
-   ```
-
-If you need to skip a certain test module temporarily you can either tell `pytest` which tests to run explicitly, so for example to skip any test modules that contain the string `link`, you could run:
-
-   ```
-   pytest `ls -1 tests/*py | grep -v link`
-   ```
+#### Run specific test module
 
 To run an individual test module:
 
    ```
    pytest tests/test_core.py
    ```
+
+#### Run specific tests
 
 Run tests by keyword expressions:
 
@@ -128,10 +126,67 @@ A more superior way, which avoids unintentional multiple matches is to use the t
    ```
 It's really just the test module followed by the specific test name, joined by `::`.
 
-More ways: https://docs.pytest.org/en/latest/usage.html
+#### Run only modified tests
 
-For nuances of configuring pytest's repo-wide behavior see [collection](https://docs.pytest.org/en/latest/example/pythoncollection.html).
+Run the tests related to the unstaged files or the current branch (according to Git).
 
+[pytest-picked](https://github.com/anapaulagomes/pytest-picked)
+
+```
+pip install pytest-picked
+```
+
+```
+pytest --picked
+```
+
+All tests will be run from files and folders which are modified, but not yet committed.
+
+
+#### Automatically rerun failed tests on source modification
+
+[pytest-xdist](https://github.com/pytest-dev/pytest-xdist) provides a very useful feature of detecting all failed tests, and then waiting for you to modify files and continuously re-rerun those failing tests until they pass while you fix them. So that you don't need to re start pytest after you made the fix. This is repeated until all tests pass after which again a full run is performed.
+
+   ```
+   pip install pytest-xdist
+   ```
+
+To enter the mode:
+   ```
+   pytest -f # or pytest --looponfail
+   ```
+
+File changes are detected by looking at looponfailingroots root directories and all of their contents (recursively). If the default for this value does not work for you you can change it in your project by setting a configuration option in `setup.cfg`:
+
+   ```
+   [tool:pytest]
+   looponfailroots = fastai tests
+   ```
+or `pytest.ini` or `tox.ini` files:
+   ```
+   [pytest]
+   looponfailroots = fastai tests
+   ```
+
+This would lead to only looking for file changes in the respective directories, specified relatively to the ini-file’s directory.
+
+[pytest-watch](https://github.com/joeyespo/pytest-watch) is an alternative implementation of this functionality.
+
+#### Skip integration tests
+
+To skip the integration tests in order to do quick testing while you work:
+
+   ```
+   pytest --skipint
+   ```
+
+#### Skip a test module
+
+If you need to skip a certain test module temporarily you can either tell `pytest` which tests to run explicitly, so for example to skip any test modules that contain the string `link`, you could run:
+
+   ```
+   pytest `ls -1 tests/*py | grep -v link`
+   ```
 
 
 ### Clearing state
@@ -157,7 +212,9 @@ This can speed up the total execution time of the test suite.
    ```
 That's twice the speed of the normal sequential execution!
 
-We just need to fix the temp files creation to use a unique string (pid?), otherwise at times some tests collide in a race condition over the same temp file path.
+XXX: We just need to fix the temp files creation to use a unique string (pid?), otherwise at times some tests collide in a race condition over the same temp file path.
+
+Since the order of executed tests is different and unpredictable, if running the test suite with `pytest-xdist` produces failures (meaning we have some undetected coupled tests), use  [pytest-replay](https://github.com/ESSS/pytest-replay) to replay the tests in the same order, which should help with then somehow reducing that failing sequence to a minimum. Currently there is *bisect*-like module that can reduce a long sequence of tests that leads to failure to the minimal one.
 
 
 ### Test order and repetition
@@ -185,6 +242,17 @@ Plugins:
    ```
    ```
    pytest --count=10 --repeat-scope=function tests
+   ```
+
+   Here is another similar module [pytest-flakefinder](https://github.com/dropbox/pytest-flakefinder):
+
+   ```
+   pip install pytest-flakefinder
+   ```
+
+   And then run every test multiple times (50 by default):
+   ```
+   pytest --flake-finder --flake-runs=5
    ```
 
 
@@ -237,6 +305,38 @@ Randomization alternatives:
 * [`pytest-randomly`](https://github.com/pytest-dev/pytest-randomly)
 
    This module has a very similar functionality/interface, but it doesn't have the bucket modes available in `pytest-random-order`. It has the same problem of imposing itself once installed.
+
+
+
+### Look and feel variations
+
+#### pytest-sugar
+
+[pytest-sugar](https://github.com/Frozenball/pytest-sugar) is a plugin that improves the look-n-feel, adds a progressbar, and show tests that fail and the assert instantly. It gets activated automatically upon installation.
+
+   ```
+   pip install pytest-sugar
+   ```
+
+To run tests without it, run:
+
+   ```
+   pytest -p no:sugar
+   ```
+
+or uninstall it.
+
+#### instantly shows failed tests
+
+[pytest-instafail](https://github.com/pytest-dev/pytest-instafail) shows failures and errors instantly instead of waiting until the end of test session.
+
+   ```
+   pip install pytest-instafail
+   ```
+
+   ```
+   pytest --instafail
+   ```
 
 
 ### To GPU or not to GPU

@@ -13,49 +13,67 @@ from nbconvert import HTMLExporter
 from IPython.core import page
 from IPython.core.display import display, Markdown, HTML
 
-__all__ = ['show_test', 'doctest', 'find_tests', 'lookup_db', 'find_test_matches', 'find_test_files', 'direct_test_match', 'fuzzy_test_match']
+__all__ = ['show_test', 'doctest', 'find_dir_tests', 'lookup_db', 'find_test_matches', 'find_test_files', 'direct_test_match', 'fuzzy_test_match', 'get_pytest_html']
 
 TestFunctionMatch = namedtuple('TestFunctionMatch', ['line_number', 'line'])
 
-def show_test(elt, search=True, markdown:bool=True)->str:
+def show_test(elt)->str:
     "Show associated tests for a fastai function/class"
-    fn_name = nbdoc.fn_name(elt)
-    md = ''
-
-    db_matches = [get_links(t) for t in lookup_db(elt)]
-    md += tests2markdown(ifnone(db_matches, []), 'This tests')
-
-    if search:
-        try:
-            direct, related = find_tests(elt)
-            direct = [get_links(t) for t in direct]
-            related = [get_links(t) for t in related]
-            direct = list(set(direct) - set(db_matches))
-            related = list(set(related) - set(db_matches) - set(direct))
-            md += tests2markdown(direct, 'Direct tests')
-            md += tests2markdown(related, 'Related tests')
-        except OSError as e:
-            print('Could not find fastai/tests folder. If you installed from conda, please install developer build instead.')
-
-    if len(md)==0: md = f'No tests found for `{fn_name}`'
-    else: md = f'Tests found for `{fn_name}`:' + md
-
-    if markdown: display(Markdown(md))
-    else: return md
-
-def tests2markdown(tests, type_label):
-    if not tests: return ''
-    md = ''
-    for link,cmd in tests:
-        md += f'\n * `{cmd}` [\[source\]]({link})'
-    return f'\n\n{type_label}:' + md
+    md = ''.join(build_tests_markdown(elt))
+    display(Markdown(md))
 
 def doctest(elt):
     "Inline notebook popup for `show_test`"
-    md = show_test(elt, markdown=False)
+    md = ''.join(build_tests_markdown(elt))
     output = HTMLExporter().markdown2html(md)
     try:    page.page({'text/html': output})
     except: display(Markdown(md))
+
+def build_tests_markdown(elt):
+    db_matches = [get_links(t) for t in lookup_db(elt)]
+    try:
+        direct, related = find_dir_tests(elt)
+        direct = [get_links(t) for t in direct]
+        related = [get_links(t) for t in related]
+        direct = list(set(direct) - set(db_matches))
+        related = list(set(related) - set(db_matches) - set(direct))
+    except OSError as e:
+        print('Could not find fastai/tests folder. If you installed from conda, please install developer build instead.')
+        direct, related = [], []
+
+    md = ''.join([
+        tests2md(db_matches, 'This tests'),
+        tests2md(direct, 'Direct tests'),
+        tests2md(related, 'Related tests')
+    ])
+    fn_name = nbdoc.fn_name(elt)
+    if len(md)==0: return f'No tests found for `{fn_name}`', md
+    else: return f'Tests found for `{fn_name}`:', md
+
+def tests2md(tests, type_label):
+    if not tests: return ''
+    md = [f'* `{cmd}` {link}' for link,cmd in tests]
+    md = [f'\n\n{type_label}:'] + md
+    return '\n'.join(md)
+
+def get_pytest_html(elt, anchor_id:str)->Tuple[str,str]:
+    title,body = build_tests_markdown(elt)
+    htmlb = HTMLExporter().markdown2html(body).replace('\n','') # nbconverter fails to parse markdown if it has both html and '\n'
+    htmlt = HTMLExporter().markdown2html(title).replace('\n','')
+    anchor_id = anchor_id.replace('.', '-') + '-pytest'
+    link, body = get_pytest_card(htmlt, htmlb, anchor_id)
+    return link, body
+
+def get_pytest_card(title, body, anchor_id):
+    "creates a collapsible bootstrap card for `show_test`"
+    link = f'<a class="source_link" data-toggle="collapse" data-target="#{anchor_id}" style="float:right; padding-right:10px">[test]</a>'
+    body = (f'<div class="collapse" id="{anchor_id}"><div class="card card-body pytest_card">'
+                f'<a type="button" data-toggle="collapse" data-target="#{anchor_id}" class="close" aria-label="Close"><span aria-hidden="true">&times;</span></a>'
+                # f'<button type="button" class="close" data-toggle="collapse" data-target="#{anchor_id}" style="float:right; padding-right:10px"></button>'
+                f'{title+body}'
+            '</div></div>'
+            '<div style="height:1px"></div>') # hack to fix jumping bootstrap header
+    return link, body
 
 def lookup_db(elt)->List[Dict]:
     "Finds `this_test` entries from test_api_db.json"
@@ -66,9 +84,9 @@ def lookup_db(elt)->List[Dict]:
     with open(db_file, 'r') as f:
         db = json.load(f)
     key = get_func_fq_name(elt)
-    return db.get(key, {})
+    return db.get(key, [])
 
-def find_tests(elt)->Tuple[List[Dict],List[Dict]]:
+def find_dir_tests(elt)->Tuple[List[Dict],List[Dict]]:
     "Searches `fastai/tests` folder for any test functions related to `elt`"
     test_dir = get_tests_dir(elt)
     test_files = find_test_files(elt)
@@ -145,7 +163,7 @@ def remove_underscore(fn_name):
     return fn_name
 
 def fuzzy_test_match(fn_name:str, lines:List[Dict], rel_path:str)->List[TestFunctionMatch]:
-    "Find any lines where `fn_name` is called and return the parent test function"
+    "Find any lines where `fn_name` is invoked and return the parent test function"
     fuzzy_line_matches = _fuzzy_line_match(fn_name, lines)
     fuzzy_matches = [get_parent_func(lno, lines, ignore_missing=True) for lno,_ in fuzzy_line_matches]
     fuzzy_matches = list(filter(None.__ne__, fuzzy_matches))
@@ -170,12 +188,8 @@ def map_test(test_file, line, line_text):
 
 def get_links(metadata)->Tuple[str,str]:
     "Returns source code link and pytest command"
-    return source_link(**metadata), pytest_command(**metadata)
+    return nbdoc.get_source_link(**metadata), pytest_command(**metadata)
 
 def pytest_command(file:str, test:str, **kwargs)->str:
     "Returns CLI command to run specific test function"
     return f'pytest -sv {file}::{test}'
-
-def source_link(line:int, file:Path, **kwargs)->str:
-    "Github link to test function"
-    return f'{nbdoc.SOURCE_URL}{file}#L{line}'

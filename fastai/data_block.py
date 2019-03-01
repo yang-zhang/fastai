@@ -4,7 +4,8 @@ from .layers import *
 from numbers import Integral
 
 __all__ = ['ItemList', 'CategoryList', 'MultiCategoryList', 'MultiCategoryProcessor', 'LabelList', 'ItemLists', 'get_files',
-           'PreProcessor', 'LabelLists', 'FloatList', 'CategoryProcessor', 'EmptyLabelList']
+           'PreProcessor', 'LabelLists', 'FloatList', 'CategoryProcessor', 'EmptyLabelList', 'MixedItem', 'MixedProcessor',
+           'MixedItemList']
 
 def _decode(df):
     return np.array([[df.columns[i] for i,t in enumerate(x) if t==1] for x in df.values], dtype=np.object)
@@ -130,7 +131,7 @@ class ItemList():
     def _relative_item_path(self, i): return self.items[i].relative_to(self.path)
     def _relative_item_paths(self):   return [self._relative_item_path(i) for i in range_of(self.items)]
 
-    def use_partial_data(self, sample_pct:float=1.0, seed:int=None)->'ItemList':
+    def use_partial_data(self, sample_pct:float=0.01, seed:int=None)->'ItemList':
         "Use only a sample of `sample_pct`of the full dataset and an optional `seed`."
         if seed is not None: np.random.seed(seed)
         rand_idx = np.random.permutation(range_of(self))
@@ -195,6 +196,17 @@ class ItemList():
         rand_idx = np.random.permutation(range_of(self))
         cut = int(valid_pct * len(self))
         return self.split_by_idx(rand_idx[:cut])
+
+    def split_subsets(self, train_size:float, valid_size:float, seed=None) -> 'ItemLists':
+        "Split the items into train set with size `train_size * n` and valid set with size `valid_size * n`."
+        assert 0 < train_size < 1
+        assert 0 < valid_size < 1
+        assert train_size + valid_size <= 1.
+        if seed is not None: np.random.seed(seed)
+        n = len(self.items)
+        rand_idx = np.random.permutation(range(n))
+        train_cut, valid_cut = int(train_size * n), int(valid_size * n)
+        return self.split_by_idxs(rand_idx[:train_cut], rand_idx[-valid_cut:])
 
     def split_by_valid_func(self, func:Callable)->'ItemLists':
         "Split the data by result of `func` (which returns `True` for validation set)."
@@ -411,9 +423,9 @@ class ItemLists():
     def __init__(self, path:PathOrStr, train:ItemList, valid:ItemList):
         self.path,self.train,self.valid,self.test = Path(path),train,valid,None
         if not self.train.ignore_empty and len(self.train.items) == 0:
-            warn("Your training set is empty. Is this is by design, pass `ignore_empty=True` to remove this warning.")
+            warn("Your training set is empty. If this is by design, pass `ignore_empty=True` to remove this warning.")
         if not self.valid.ignore_empty and len(self.valid.items) == 0:
-            warn("""Your validation set is empty. Is this is by design, use `no_split()`
+            warn("""Your validation set is empty. If this is by design, use `no_split()`
                  or pass `ignore_empty=True` when labelling to remove this warning.""")
         if isinstance(self.train, LabelList): self.__class__ = LabelLists
 
@@ -695,3 +707,57 @@ def _databunch_load_empty(cls, path, fname:str='export.pkl'):
 
 DataBunch.load_empty = _databunch_load_empty
 
+class MixedProcessor(PreProcessor):
+    def __init__(self, procs:Collection[Union[PreProcessor, Collection[PreProcessor]]]):
+        self.procs = procs
+    
+    def process_one(self, item:Any): 
+        res = []
+        for procs, i in zip(self.procs, item):
+            for p in procs: i = p.process_one(i)
+            res.append(i)
+        return res
+    
+    def process(self, ds:Collection): 
+        for procs, il in zip(self.procs, ds.item_lists):
+            for p in procs: p.process(il)
+                
+class MixedItem(ItemBase):
+    def __init__(self, items):
+        self.obj = items
+        self.data = [item.data for item in items]
+    
+    def __repr__(self): return '\n'.join([f'{self.__class__.__name__}'] + [repr(item) for item in self.obj]) 
+    
+    def apply_tfms(self, tfms:Collection, **kwargs):
+        self.obj = [item.apply_tfms(t, **kwargs) for item,t in zip(self.obj, tfms)]
+        self.data = [item.data for item in self.obj]
+        return self
+
+class MixedItemList(ItemList):
+    
+    def __init__(self, item_lists, path:PathOrStr=None, label_cls:Callable=None, inner_df:Any=None, 
+                 x:'ItemList'=None, ignore_empty:bool=False, processor=None):
+        self.item_lists = item_lists
+        default_procs = [[p(ds=il) for p in listify(il._processor)] for il in item_lists]
+        if processor is None:
+            processor = MixedProcessor([ifnone(il.processor, dp) for il,dp in zip(item_lists, default_procs)])
+        super().__init__(range_of(item_lists[0]), processor=processor, path=ifnone(path, item_lists[0].path), 
+                         label_cls=label_cls, inner_df=inner_df, x=x, ignore_empty=ignore_empty)
+    
+    def new(self, item_lists, processor:PreProcessor=None, **kwargs)->'ItemList':
+        "Create a new `ItemList` from `items`, keeping the same attributes."
+        processor = ifnone(processor, self.processor)
+        copy_d = {o:getattr(self,o) for o in self.copy_new}
+        kwargs = {**copy_d, **kwargs}
+        return self.__class__(item_lists, processor=processor, **kwargs)
+    
+    def get(self, i):
+        return MixedItem([il.get(i) for il in self.item_lists])
+    
+    def __getitem__(self,idxs:int)->Any:
+        idxs = try_int(idxs)
+        if isinstance(idxs, Integral): return self.get(idxs)
+        else: 
+            item_lists = [il.new(il.items[idxs], inner_df=index_row(il.inner_df, idxs)) for il in self.item_lists]
+            return self.new(item_lists, inner_df=index_row(self.inner_df, idxs))

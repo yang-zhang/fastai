@@ -5,6 +5,8 @@ from .callback import *
 from .data_block import *
 from .utils.mem import gpu_mem_restore
 import inspect
+from fastprogress.fastprogress import format_time
+from time import time
 
 __all__ = ['Learner', 'LearnerCallback', 'Recorder', 'RecordOnCPU', 'fit', 'loss_batch', 'train_epoch', 'validate',
            'get_preds', 'load_learner']
@@ -69,7 +71,6 @@ def train_epoch(model:nn.Module, dl:DataLoader, opt:optim.Optimizer, loss_func:L
         opt.step()
         opt.zero_grad()
 
-@gpu_mem_restore
 def fit(epochs:int, model:nn.Module, loss_func:LossFunction, opt:optim.Optimizer,
         data:DataBunch, callbacks:Optional[CallbackList]=None, metrics:OptMetrics=None)->None:
     "Fit the `model` on `data` and learn using `loss_func` and `opt`."
@@ -146,6 +147,7 @@ class Learner():
     callback_fns:Collection[Callable]=None
     callbacks:Collection[Callback]=field(default_factory=list)
     layer_groups:Collection[nn.Module]=None
+    add_time:bool=True
     def __post_init__(self)->None:
         "Setup path,metrics, callbacks and ensure model directory exists."
         self.path = Path(ifnone(self.path, self.data.path))
@@ -155,7 +157,7 @@ class Learner():
         self.metrics=listify(self.metrics)
         if not self.layer_groups: self.layer_groups = [nn.Sequential(*flatten_model(self.model))]
         self.callbacks = listify(self.callbacks)
-        self.callback_fns = [Recorder] + listify(self.callback_fns)
+        self.callback_fns = [partial(Recorder, add_time=self.add_time)] + listify(self.callback_fns)
 
     def init(self, init): apply_init(self.model, init)
 
@@ -188,7 +190,7 @@ class Learner():
         self.layer_groups = split_model(self.model, split_on)
 
     def freeze_to(self, n:int)->None:
-        "Freeze layers up to layer `n`."
+        "Freeze layers up to layer group `n`."
         for g in self.layer_groups[:n]:
             for l in g:
                 if not self.train_bn or not isinstance(l, bn_types): requires_grad(l, False)
@@ -196,7 +198,7 @@ class Learner():
         self.create_opt(defaults.lr)
 
     def freeze(self)->None:
-        "Freeze up to last layer."
+        "Freeze up to last layer group."
         assert(len(self.layer_groups)>1)
         self.freeze_to(-1)
         self.create_opt(defaults.lr)
@@ -208,6 +210,7 @@ class Learner():
 
     def export(self, fname:str='export.pkl', destroy=False):
         "Export the state of the `Learner` in `self.path/fname`."
+        if os.environ.get('RANK'): return # don't save if slave proc
         args = ['opt_func', 'loss_func', 'metrics', 'true_wd', 'bn_wd', 'wd', 'train_bn', 'model_dir', 'callback_fns']
         state = {a:getattr(self,a) for a in args}
         state['cb_state'] = {cb.__class__:cb.get_state() for cb in self.callbacks}
@@ -224,6 +227,7 @@ class Learner():
 
     def save(self, name:PathOrStr, return_path:bool=False, with_opt:bool=True):
         "Save model and optimizer state (if `with_opt`) with `name` to `self.model_dir`."
+        if os.environ.get('RANK'): return # don't save if slave proc
         path = self.path/self.model_dir/f'{name}.pth'
         if not hasattr(self, 'opt'): with_opt=False
         if not with_opt: state = get_model(self.model).state_dict()
@@ -273,7 +277,7 @@ class Learner():
     def purge(self, clear_opt:bool=True):
         "Purge the `Learner` of all cached attributes to release some GPU memory."
 
-        tmp_file = self.path/'purge-tmp.pkl'
+        tmp_file = get_tmp_file(self.path)
         attrs_all = [k for k in self.__dict__.keys() if not k.startswith("__")]
         attrs_pkl = ['bn_wd', 'callback_fns', 'layer_groups', 'loss_func', 'metrics', 'model',
                      'model_dir', 'opt_func', 'path', 'train_bn', 'true_wd', 'wd']
@@ -405,11 +409,11 @@ class LearnerCallback(Callback):
 class Recorder(LearnerCallback):
     "A `LearnerCallback` that records epoch, loss, opt and metric data during training."
     _order=-10
-    def __init__(self, learn:Learner):
+    def __init__(self, learn:Learner, add_time:bool=True):
         super().__init__(learn)
         self.opt = self.learn.opt
         self.train_dl = self.learn.data.train_dl
-        self.no_val,self.silent = False,False
+        self.no_val,self.silent,self.add_time = False,False,add_time
 
     def on_train_begin(self, pbar:PBar, metrics_names:Collection[str], **kwargs:Any)->None:
         "Initialize recording status at beginning of training."
@@ -417,8 +421,12 @@ class Recorder(LearnerCallback):
         self.names = ['epoch', 'train_loss'] if self.no_val else ['epoch', 'train_loss', 'valid_loss']
         self.names += metrics_names
         if hasattr(self, '_added_met_names'): self.names += self._added_met_names
+        if self.add_time: self.names.append('time')
         if not self.silent: self.pbar.write(self.names, table=True)
         self.losses,self.val_losses,self.lrs,self.moms,self.metrics,self.nb_batches = [],[],[],[],[],[]
+
+    def on_epoch_begin(self, **kwargs:Any)->None:
+        if self.add_time: self.start_epoch = time()
 
     def on_batch_begin(self, train, **kwargs:Any)->None:
         "Record learning rate and momentum at beginning of batch."
@@ -449,6 +457,7 @@ class Recorder(LearnerCallback):
         str_stats = []
         for name,stat in zip(self.names,stats):
             str_stats.append('' if stat is None else str(stat) if isinstance(stat, int) else f'{stat:.6f}')
+        if self.add_time: str_stats.append(format_time(time() - self.start_epoch))
         if not self.silent: self.pbar.write(str_stats, table=True)
 
     def add_metrics(self, metrics):
@@ -459,18 +468,21 @@ class Recorder(LearnerCallback):
         "Add `names` to the inner metric names."
         self._added_met_names = names
 
-    def plot_lr(self, show_moms=False)->None:
+    def plot_lr(self, show_moms=False, return_fig:bool=None)->Optional[plt.Figure]:
         "Plot learning rate, `show_moms` to include momentum."
         iterations = range_of(self.lrs)
         if show_moms:
-            _, axs = plt.subplots(1,2, figsize=(12,4))
+            fig, axs = plt.subplots(1,2, figsize=(12,4))
             axs[0].plot(iterations, self.lrs)
             axs[0].set_xlabel('Iterations')
             axs[0].set_ylabel('Learning Rate')
             axs[1].plot(iterations, self.moms)
             axs[1].set_xlabel('Iterations')
             axs[1].set_ylabel('Momentum')
-        else: plt.plot(iterations, self.lrs)
+        else:
+            fig, ax = plt.subplots()
+            ax.plot(iterations, self.lrs)
+        if ifnone(return_fig, defaults.return_fig): return fig
 
     @staticmethod
     def smoothen_by_spline(xs, ys, **kwargs):
@@ -479,13 +491,14 @@ class Recorder(LearnerCallback):
         ys = spl(xs)
         return ys
 
-    def plot(self, skip_start:int=10, skip_end:int=5, suggestion:bool=False, **kwargs)->None:
+    def plot(self, skip_start:int=10, skip_end:int=5, suggestion:bool=False, return_fig:bool=None,
+             **kwargs)->Optional[plt.Figure]:
         "Plot learning rate and losses, trimmed between `skip_start` and `skip_end`. Optionally plot and return min gradient"
         lrs = self.lrs[skip_start:-skip_end] if skip_end > 0 else self.lrs[skip_start:]
         losses = self.losses[skip_start:-skip_end] if skip_end > 0 else self.losses[skip_start:]
         losses = [x.item() for x in losses]
         if 'k' in kwargs: losses = self.smoothen_by_spline(lrs, losses, **kwargs)
-        _, ax = plt.subplots(1,1)
+        fig, ax = plt.subplots(1,1)
         ax.plot(lrs, losses)
         ax.set_ylabel("Loss")
         ax.set_xlabel("Learning Rate")
@@ -499,12 +512,13 @@ class Recorder(LearnerCallback):
             print(f"Min numerical gradient: {lrs[mg]:.2E}")
             ax.plot(lrs[mg],losses[mg],markersize=10,marker='o',color='red')
             self.min_grad_lr = lrs[mg]
+        if ifnone(return_fig, defaults.return_fig): return fig
 
-    def plot_losses(self, last:int=None)->None:
+    def plot_losses(self, last:int=None, return_fig:bool=None)->Optional[plt.Figure]:
         "Plot training and validation losses."
         last = ifnone(last,len(self.nb_batches))
         assert last<=len(self.nb_batches), f"We can only plot up to the last {len(self.nb_batches)} epochs. Please adapt 'last' parameter accordingly."
-        _, ax = plt.subplots(1,1)
+        fig, ax = plt.subplots(1,1)
         l_b = np.sum(self.nb_batches[-last:])
         iterations = range_of(self.losses)[-l_b:]
         ax.plot(iterations, self.losses[-l_b:], label='Train')
@@ -514,17 +528,19 @@ class Recorder(LearnerCallback):
         ax.set_ylabel('Loss')
         ax.set_xlabel('Batches processed')
         ax.legend()
+        if ifnone(return_fig, defaults.return_fig): return fig
 
-    def plot_metrics(self)->None:
+    def plot_metrics(self, return_fig:bool=None)->Optional[plt.Figure]:
         "Plot metrics collected during training."
         assert len(self.metrics) != 0, "There are no metrics to plot."
-        _, axes = plt.subplots(len(self.metrics[0]),1,figsize=(6, 4*len(self.metrics[0])))
+        fig, axes = plt.subplots(len(self.metrics[0]),1,figsize=(6, 4*len(self.metrics[0])))
         val_iter = self.nb_batches
         val_iter = np.cumsum(val_iter)
         axes = axes.flatten() if len(self.metrics[0]) != 1 else [axes]
         for i, ax in enumerate(axes):
             values = [met[i] for met in self.metrics]
             ax.plot(val_iter, values)
+        if ifnone(return_fig, defaults.return_fig): return fig
 
 class FakeOptimizer():
     def step(self): pass
