@@ -1,5 +1,6 @@
-import pytest, fastai
+import pytest
 from fastai.utils.mem import *
+from fastai.gen_doc.doctest import this_tests
 from utils.mem import *
 from utils.text import *
 from math import isclose
@@ -22,6 +23,7 @@ def check_gpu_mem_non_zeros(total, used, free):
     assert free  > 0, "have free GPU RAM"
 
 def test_gpu_mem_by_id():
+    this_tests(gpu_mem_get)
     # test by currently selected device
     total, used, free = gpu_mem_get()
     if use_gpu: check_gpu_mem_non_zeros(total, used, free)
@@ -32,6 +34,7 @@ def test_gpu_mem_by_id():
 
 def test_gpu_mem_all():
     # all available gpus
+    this_tests(gpu_mem_get_all)
     mem_per_id = gpu_mem_get_all()
     if use_gpu:
         for mem in mem_per_id: check_gpu_mem_non_zeros(*mem)
@@ -39,6 +42,7 @@ def test_gpu_mem_all():
         assert len(mem_per_id) == 0
 
 def test_gpu_with_max_free_mem():
+    this_tests(gpu_with_max_free_mem)
     # all available gpus
     id, free = gpu_with_max_free_mem()
     if use_gpu:
@@ -50,6 +54,7 @@ def test_gpu_with_max_free_mem():
 
 @pytest.mark.cuda
 def test_gpu_mem_measure_consumed_reclaimed():
+    this_tests(gpu_mem_get_used)
     gpu_mem_reclaim()
     used_before = gpu_mem_get_used()
 
@@ -69,30 +74,118 @@ def test_gpu_mem_measure_consumed_reclaimed():
 
 @pytest.mark.cuda
 def test_gpu_mem_trace():
-    mem_trace = GPUMemTrace()
-    mem_trace.start()
+
+    gpu_prepare_clean_slate()
+
+    mtrace = GPUMemTrace()
+    this_tests(mtrace.__class__)
+
+    ### 1. more allocated, less released, then all released, w/o counter reset
     # expecting used=~10, peaked=~15
     x1 = gpu_mem_allocate_mbs(10)
     x2 = gpu_mem_allocate_mbs(15)
     del x2
-    mem_trace.stop()
-    #print(mem_trace)
-    delta_used, delta_peaked = mem_trace.data()
-    assert abs(delta_used)-10   < 2, f"used {delta_used}MB GPU RAM"
-    assert abs(delta_peaked)-15 < 2, f"used {delta_peaked}MB GPU RAM"
+    yield_to_thread() # hack: ensure peak thread gets a chance to measure the peak
+    check_mtrace(used_exp=10, peaked_exp=15, mtrace=mtrace, abs_tol=2, ctx="rel some")
 
-    with CaptureStdout() as cs:
-        mem_trace.report("whoah!")
-    match = re.findall(r'△used: \d+MB, △peaked: \d+MB: whoah!', cs.out)
-    assert match
+    # check `report`'s format including the right numbers
+    ctx = "whoah"
+    with CaptureStdout() as cs: mtrace.report(ctx)
+    used, peaked = parse_mtrace_repr(cs.out, ctx)
+    check_mem(used_exp=10,   peaked_exp=15,
+              used_rcv=used, peaked_rcv=peaked, abs_tol=2, ctx="trace `report`")
+
+    # release the remaining allocation, keeping the global counter running w/o reset
+    # expecting used=~0, peaked=~25
+    del x1
+    check_mtrace(used_exp=0, peaked_exp=25, mtrace=mtrace, abs_tol=2, ctx="rel all")
+
+    ### 2. more allocated, less released, then all released, w/ counter reset
+    # expecting used=~10, peaked=~15
+    x1 = gpu_mem_allocate_mbs(10)
+    x2 = gpu_mem_allocate_mbs(15)
+    yield_to_thread() # hack: ensure peak thread gets a chance to measure the peak
+    del x2
+    check_mtrace(used_exp=10, peaked_exp=15, mtrace=mtrace, abs_tol=2, ctx="rel some")
+
+    # release the remaining allocation, resetting the global counter
+    mtrace.reset()
+    # expecting used=-10, peaked=0
+    del x1
+    check_mtrace(used_exp=-10, peaked_exp=0, mtrace=mtrace, abs_tol=2, ctx="rel all")
+
+    # test context + subcontext
+    ctx = 'test2'
+    mtrace = GPUMemTrace(ctx=ctx)
+    mtrace.start() # not needed, calling for testing
+    check_mtrace(used_exp=0, peaked_exp=0, mtrace=mtrace, abs_tol=2, ctx=ctx)
+    # 1. main context
+    with CaptureStdout() as cs: mtrace.report()
+    used, peaked = parse_mtrace_repr(cs.out, ctx)
+    check_mem(used_exp=0,    peaked_exp=0,
+              used_rcv=used, peaked_rcv=peaked, abs_tol=2, ctx="auto-report on exit")
+    # 2. context+sub-context
+    subctx = 'sub-context test'
+    with CaptureStdout() as cs: mtrace.report(subctx)
+    used, peaked = parse_mtrace_repr(cs.out, f'{ctx}: {subctx}')
+    check_mem(used_exp=0,    peaked_exp=0,
+              used_rcv=used, peaked_rcv=peaked, abs_tol=2, ctx="auto-report on exit")
+
+    mtrace.stop()
 
 @pytest.mark.cuda
 def test_gpu_mem_trace_ctx():
-    # expecting used=20, peaked=0
-    with GPUMemTrace() as mem_trace:
-        x1 = gpu_mem_allocate_mbs(20)
-    delta_used, delta_peaked = mem_trace.data()
-    #print(mem_trace)
+    # context manager
+    # expecting used=20, peaked=0, auto-printout
+    with CaptureStdout() as cs:
+        with GPUMemTrace() as mtrace:
+            x1 = gpu_mem_allocate_mbs(20)
+    _, _ = parse_mtrace_repr(cs.out, "exit")
+    this_tests(mtrace.__class__)
+    check_mtrace(used_exp=20, peaked_exp=0, mtrace=mtrace, abs_tol=2, ctx="ctx manager")
+    del x1
 
-    assert abs(delta_used)-20 < 5, f"used {delta_used}MB GPU RAM"
-    assert abs(delta_peaked) == 0, f"used {delta_peaked}MB GPU RAM"
+    # auto-report on exit w/ context and w/o
+    for ctx in [None, "test"]:
+        with CaptureStdout() as cs:
+            with GPUMemTrace(ctx=ctx):
+                # expecting used=20, peaked=0
+                x1 = gpu_mem_allocate_mbs(20)
+        if ctx is None: ctx = "exit" # exit is the hardcoded subctx for ctx manager
+        else:           ctx += ": exit"
+        used, peaked = parse_mtrace_repr(cs.out, ctx)
+        check_mem(used_exp=20,   peaked_exp=0,
+                  used_rcv=used, peaked_rcv=peaked, abs_tol=2, ctx="auto-report on exit")
+        del x1
+
+    # auto-report off
+    ctx = "auto-report off"
+    with CaptureStdout() as cs:
+        with GPUMemTrace(ctx=ctx, on_exit_report=False): 1
+    assert len(cs.out) == 0, f"stdout: {cs.out}"
+
+
+# setup for test_gpu_mem_trace_decorator
+@gpu_mem_trace
+def experiment1(): pass
+
+class NewTestExp():
+    @staticmethod
+    @gpu_mem_trace
+    def experiment2(): pass
+
+@pytest.mark.cuda
+def test_gpu_mem_trace_decorator():
+    this_tests(gpu_mem_trace)
+
+    # func
+    with CaptureStdout() as cs: experiment1()
+    used, peaked = parse_mtrace_repr(cs.out, "experiment1: exit")
+    check_mem(used_exp=0,    peaked_exp=0,
+              used_rcv=used, peaked_rcv=peaked, abs_tol=2, ctx="")
+
+    # class func
+    with CaptureStdout() as cs: NewTestExp.experiment2()
+    used, peaked = parse_mtrace_repr(cs.out, "NewTestExp.experiment2: exit")
+    check_mem(used_exp=0,    peaked_exp=0,
+              used_rcv=used, peaked_rcv=peaked, abs_tol=2, ctx="")

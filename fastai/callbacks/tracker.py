@@ -4,7 +4,8 @@ from fastai.torch_core import *
 from fastai.callback import *
 from fastai.basic_train import *
 
-__all__ = ['TerminateOnNaNCallback', 'EarlyStoppingCallback', 'SaveModelCallback', 'TrackerCallback', 'ReduceLROnPlateauCallback' ]
+__all__ = ['TerminateOnNaNCallback', 'EarlyStoppingCallback', 'SaveModelCallback', 'TrackerCallback',
+        'ReduceLROnPlateauCallback', 'TrackEpochCallback' ]
 
 class TerminateOnNaNCallback(Callback):
     "A `Callback` that terminates training if loss is NaN."
@@ -46,7 +47,7 @@ class TrackerCallback(LearnerCallback):
         elif len(self.learn.recorder.val_losses) == 0: return None
         values = {'trn_loss':self.learn.recorder.losses[-1:][0].cpu().numpy(),
                   'val_loss':self.learn.recorder.val_losses[-1:][0]}
-        for i, name in enumerate(self.learn.recorder.names[3:]):
+        for i, name in enumerate(self.learn.recorder.names[3:-1]):
             values[name]=self.learn.recorder.metrics[-1:][0][i]
         if values.get(self.monitor) is None:
             warn(f'{self.__class__} conditioned on metric `{self.monitor}` which is not available. Available metrics are: {", ".join(map(str, self.learn.recorder.names[1:]))}')
@@ -103,7 +104,7 @@ class SaveModelCallback(TrackerCallback):
 
 class ReduceLROnPlateauCallback(TrackerCallback):
     "A `TrackerCallback` that reduces learning rate when a metric has stopped improving."
-    def __init__(self, learn:Learner, monitor:str='val_loss', mode:str='auto', patience:int=0, factor:float=0.2, 
+    def __init__(self, learn:Learner, monitor:str='val_loss', mode:str='auto', patience:int=0, factor:float=0.2,
                  min_delta:int=0):
         super().__init__(learn, monitor=monitor, mode=mode)
         self.patience,self.factor,self.min_delta = patience,factor,min_delta
@@ -125,3 +126,15 @@ class ReduceLROnPlateauCallback(TrackerCallback):
                 self.opt.lr *= self.factor
                 self.wait = 0
                 print(f'Epoch {epoch}: reducing lr to {self.opt.lr}')
+
+
+class TrackEpochCallback(LearnerCallback):
+    def __init__(self, learn:Learner, name:str='epoch'):
+        """Store completed epoch number in `learn.model_dir/name"""
+        super().__init__(learn)
+        self.name = name
+        self.path = learn.path/learn.model_dir/name
+
+    def on_epoch_end(self, epoch, **kwargs:Any)->None:
+        with self.path.open('w') as f: f.write(f'{epoch}')
+

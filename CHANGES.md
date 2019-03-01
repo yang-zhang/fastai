@@ -10,22 +10,48 @@ Note that the top-most release is changes in the unreleased master branch on
 Github. Parentheses after an item show the name or github id of the contributor
 of that change.
 
-## 1.0.46.dev0 (Work In Progress)
+## 1.0.47.dev0 (Work In Progress)
+
+### New:
+
+- `LabelLists.pre_transform`: call transforms on PIL.Image, before converting to float tensor
+- `LabelLists.presize`: standard Imagenet image resizing/cropping using `pre_transform`
+- `compose`: compose a list of functions
+- `TrackEpochCallback`: Store completed epoch number in `learn.model_dir/name`
+
+### Changed:
+
+- Change `flip_lr` to use much faster method
+- In `text_classifier_learner` the outputs of the encoder corresponding to pad indices are ignored in the poolings.
+- Default number of OpenMP threads to 2 (previously 4), due to observed performance benefits
+- In `text_classifier_learner` the outputs of the encoder corresponding to pad indices are ignored in the poolings.
+
+### Fixed:
+
+- Do nothing if `Image.resize` called with image already at required size
+- Lighting transforms moved to later in pipeline to avoid redundent computation
+
+## 1.0.46 (2019-02-25)
 
 ### Breaking change:
 
 - In `CollabDataBunch`, `pct_val` is renamed `valid_pct` for consistency
+- `ImageItemList` becomes `ImageList` for consistency with `TextList` and `TabularList`
+- `load_learner` will fail for exported (pickled) models with error
+  "AttributeError: Can't get attribute 'ImageItemList' on module
+  'fastai.vision.data'". You will need to re-export with version 1.0.46 or use 1.0.44
 
 ### New:
 
-- `Learner.destroy`: completely free up `learn`, leaving an empty shell (to replace `gc.collect` eye-sore)
-- added NVML query support on OSX via `pynvx` in addition to `pynvml`
+- `Learner.destroy`: completely free up `learn`, leaving an empty shell
+- added NVML query support on OSX via `pynvx` in addition to `pynvml` (Windows/Linux)
 - Added `XResNet`, which is ResNet plus tricks from
   [Bag of Tricks for Image Classification](https://arxiv.org/abs/1812.01187).
   Note pretrained models not available yet for this architecture.
 - `TextClassificationInterpretation`, which computes intrisic attention to give some interpretation of classification
   results in text (thanks to herrmann)
 - `add_cyclical_datepart`, which add the dateparts as cosine embeddings in tabular data (thanks to herrmann)
+- `MixedItemList` two mix several kinds of `ItemList` together
 
 ### Changed:
 
@@ -40,9 +66,9 @@ of that change.
 - `verify_images` fixes channels even if no new size is passed
 
 
-## 1.0.45 (2019-02-13)
+## 1.0.45
 
-wasn't released.
+Not Released
 
 
 ## 1.0.44 (2019-02-13)

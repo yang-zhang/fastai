@@ -102,9 +102,12 @@ If you need to make a hotfix to an already released version, follow the [Hotfix 
 Here is the "I'm feeling lucky" version, do not attempt unless you understand the build process.
 
 ```
-make release 2>&1 | tee release-`date +"%Y-%m-%d-%H:%M:%S"`.log
+make release
 ```
-Ideally, don't remove the part that saves the full log - you might need it later.
+
+This target will automatically log its stdout and stderr into a log file of date format `release-%Y-%m-%d-%H-%M-%S.log`.
+
+Ideally, please keep this file around for a few days in case we need to diagnose any problems with the release process at a later time.
 
 `make test`'s non-deterministic tests may decide to fail right during the release rites. It has now been moved to the head of the process, so if it fails not due to a bug but due to its unreliability, it won't affect the release process. Just rerun `make release` again.
 
@@ -476,12 +479,23 @@ To build a PyPI package and release it on [pypi.org/](https://pypi.org/project/f
     python setup.py sdist
     ```
 
-    `MANIFEST.in` is in charge of what source files are included in the package. If you want to include the whole directory `tests`, but not `tests/data` for example, adjust `MANIFEST.in` to have:
+    `MANIFEST.in` is in charge of what source files are included in the package. Here are some practical usage examples:
+
+    To include a sub-directory recursively, e.g. `docs` (one directory per instruction):
+    ```
+    graft docs
+    ```
+
+    If you want to include the whole directory `tests`, but not `tests/data` for example, adjust `MANIFEST.in` to have:
 
     ```
-    recursive-include tests *
+    graft tests
     prune tests/data
+    ```
 
+    To exclude some extensions from everywhere, e.g. all `*pyc` and `*.pyo`:
+    ```
+    global-exclude *.py[co]
     ```
 
     For more details, see [Creating a Source Distribution](https://docs.python.org/3/distutils/sourcedist.html)
@@ -904,7 +918,7 @@ Tagging targets:
 
     ```
     git checkout 9fceb02a
-    GIT_COMMITTER_DATE="$(git show --format=%aD | head -1)" git tag -a v1.0.5 -m "1.0.5"
+    GIT_COMMITTER_DATE="$(git show --format=%aD | head -1)" git tag -a 1.0.5 -m "1.0.5"
     git push --tags origin master
     git checkout master
     ```
