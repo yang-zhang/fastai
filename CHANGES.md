@@ -17,19 +17,24 @@ of that change.
 - `LabelLists.pre_transform`: call transforms on PIL.Image, before converting to float tensor
 - `LabelLists.presize`: standard Imagenet image resizing/cropping using `pre_transform`
 - `compose`: compose a list of functions
+- Added functional `[test]` links to docs.fast.ai
 - `TrackEpochCallback`: Store completed epoch number in `learn.model_dir/name`
+- `rank_distrib`: get rank of distributed process
 
 ### Changed:
 
 - Change `flip_lr` to use much faster method
-- In `text_classifier_learner` the outputs of the encoder corresponding to pad indices are ignored in the poolings.
+- In `text_classifier_learner` the outputs of the encoder corresponding to pad indices are ignored in the poolings
 - Default number of OpenMP threads to 2 (previously 4), due to observed performance benefits
-- In `text_classifier_learner` the outputs of the encoder corresponding to pad indices are ignored in the poolings.
+- In `text_classifier_learner` the outputs of the encoder corresponding to pad indices are ignored in the poolings
+- `purge` now relies on a writable `learn.model_dir`, which can be set to a full writable path in case `learn.path` is not writable (kaggle, et al)
+- In any event of a `Callback` returning a dictionary will update the state of the `CallbackHandler`
+- When creating a custom metric in a `Callback`, instead of storing the result in `self.metric`, you should add it to `last_metrics` using the method above (see https://docs.fast.ai/metrics.html#Creating-your-own-metric).
 
 ### Fixed:
 
 - Do nothing if `Image.resize` called with image already at required size
-- Lighting transforms moved to later in pipeline to avoid redundent computation
+- Lighting transforms moved to later in pipeline to avoid redundant computation
 
 ## 1.0.46 (2019-02-25)
 

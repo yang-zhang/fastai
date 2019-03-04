@@ -69,6 +69,30 @@ def check_learner(learn, train_items):
     assert train_items == len(learn.data.train_ds.items)
     # XXX: could use more sanity checks
 
+def test_purge():
+    learn = fake_learner() # don't use fixture - we mess with the object
+    this_tests(learn.purge)
+
+    # just testing we can run each of these
+    learn.purge()
+    learn.purge(clear_opt=False)
+
+    # writable dir
+    model_dir_orig = learn.model_dir
+    learn.model_dir = "." # should succeed
+    learn.purge()
+    learn.model_dir = model_dir_orig
+
+    # should fail to purge with a non-existent path
+    learn.model_dir = "lkjasdjssdlj"
+    try: learn.purge()
+    except Exception as e:
+        assert "Can't write to" in str(e) # should fail
+    else: assert False, "should have failed with non-writable path"
+
+    finally: # restore the learner fixture
+        learn.model_dir = model_dir_orig
+
 def test_save_load(learn):
     this_tests(learn.save, learn.load, learn.purge)
     name = 'mnist-tiny-test-save-load'
@@ -151,16 +175,15 @@ def test_destroy():
     assert "epoch" in cs.out
     assert "train_loss" in cs.out
 
-
 def subtest_destroy_mem(data):
     with GPUMemTrace() as mtrace:
         learn = learn_large_unfit(data)
-    check_mtrace(used_exp=20, peaked_exp=0, mtrace=mtrace, abs_tol=10, ctx="load")
+    load_used, load_peaked = mtrace.data()
 
     # destroy should free most of the memory that was allocated during load (training, etc.)
     with GPUMemTrace() as mtrace:
         with CaptureStdout() as cs: learn.destroy()
-    check_mtrace(used_exp=-20, peaked_exp=0, mtrace=mtrace, abs_tol=10, ctx="destroy")
+    check_mtrace(used_exp=-load_used, peaked_exp=-load_peaked, mtrace=mtrace, abs_tol=10, ctx="destroy")
 
 # memory tests behave differently when run individually and in a row, since
 # memory utilization patterns are very inconsistent - would require a full gpu
@@ -168,6 +191,8 @@ def subtest_destroy_mem(data):
 # all in a precise sequence
 @pytest.mark.cuda
 def test_memory(data):
+    this_tests(Learner.save, Learner.load, Learner.purge, Learner.destroy)
+
     # A big difficulty with measuring memory consumption is that it varies quite
     # wildly from one GPU model to another.
     #
@@ -175,7 +200,6 @@ def test_memory(data):
     # override check_mem above in tests.utils.mem with report_mem to acquire a new set
     #
     # So for now just testing the specific card I have until a better way is found.
-
     dev_name = torch.cuda.get_device_name(None)
     if dev_name != 'GeForce GTX 1070 Ti':
         pytest.skip(f"currently only matched for mem usage on specific GPU models, {dev_name} is not one of them")

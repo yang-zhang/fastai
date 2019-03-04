@@ -18,12 +18,7 @@ class TerminateOnNaNCallback(Callback):
         if self.stop: return True #to skip validation after stopping during training
         if torch.isnan(last_loss):
             print (f'Epoch/Batch ({epoch}/{num_batch}): Invalid loss, terminating training.')
-            self.stop = True
-            return True
-
-    def on_epoch_end(self, **kwargs:Any)->None:
-        "Stop the training if necessary."
-        return self.stop
+            return {'stop_epoch': True, 'stop_training': True}
 
 class TrackerCallback(LearnerCallback):
     "A `LearnerCallback` that keeps track of the best value in `monitor`."
@@ -86,8 +81,12 @@ class SaveModelCallback(TrackerCallback):
         if self.every not in ['improvement', 'epoch']:
             warn(f'SaveModel every {self.every} is invalid, falling back to "improvement".')
             self.every = 'improvement'
+                 
+    def jump_to_epoch(self, epoch:int)->None:
+        try: self.learn.load(f'{self.name}_{epoch-1}')
+        except: print(f'Model {self.name}_{epoch-1} not found.')
 
-    def on_epoch_end(self, epoch, **kwargs:Any)->None:
+    def on_epoch_end(self, epoch:int, **kwargs:Any)->None:
         "Compare the value monitored to its best score and maybe save the model."
         if self.every=="epoch": self.learn.save(f'{self.name}_{epoch}')
         else: #every="improvement"
@@ -129,11 +128,20 @@ class ReduceLROnPlateauCallback(TrackerCallback):
 
 
 class TrackEpochCallback(LearnerCallback):
-    def __init__(self, learn:Learner, name:str='epoch'):
-        """Store completed epoch number in `learn.model_dir/name"""
+    _order = -20 #Need to run before fit_one_cycle
+    def __init__(self, learn:Learner, name:str='epoch', epoch_offset:int=None):
+        "Store completed epoch number in `learn.model_dir/name`."
         super().__init__(learn)
-        self.name = name
         self.path = learn.path/learn.model_dir/name
+        if epoch_offset is None:
+            if os.path.isfile(self.path):
+                 with self.path.open('r') as f:
+                     try:    self.start_epoch = int(f.read())+1
+                     except: self.start_epoch = 0
+            else: self.start_epoch = 0
+                
+    def on_train_begin(self, **kwargs:Any):
+        return {'epoch': self.start_epoch}
 
     def on_epoch_end(self, epoch, **kwargs:Any)->None:
         with self.path.open('w') as f: f.write(f'{epoch}')

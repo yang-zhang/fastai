@@ -3,7 +3,7 @@ from .torch_core import *
 from .basic_data import *
 from .callback import *
 from .data_block import *
-from .utils.mem import gpu_mem_restore
+from .utils.ipython import gpu_mem_restore
 import inspect
 from fastprogress.fastprogress import format_time
 from time import time
@@ -53,7 +53,8 @@ def validate(model:nn.Module, dl:DataLoader, loss_func:OptLossFunc=None, cb_hand
         if cb_handler: cb_handler.set_dl(dl)
         for xb,yb in progress_bar(dl, parent=pbar, leave=(pbar is not None)):
             if cb_handler: xb, yb = cb_handler.on_batch_begin(xb, yb, train=False)
-            val_losses.append(loss_batch(model, xb, yb, loss_func, cb_handler=cb_handler))
+            val_loss = loss_batch(model, xb, yb, loss_func, cb_handler=cb_handler)
+            val_losses.append(val_loss)
             if not is_listy(yb): yb = [yb]
             nums.append(yb[0].shape[0])
             if cb_handler and cb_handler.on_batch_end(val_losses[-1]): break
@@ -143,7 +144,7 @@ class Learner():
     wd:Floats=defaults.wd
     train_bn:bool=True
     path:str = None
-    model_dir:str = 'models'
+    model_dir:PathOrStr = 'models'
     callback_fns:Collection[Callable]=None
     callbacks:Collection[Callback]=field(default_factory=list)
     layer_groups:Collection[nn.Module]=None
@@ -208,9 +209,9 @@ class Learner():
         self.freeze_to(0)
         self.create_opt(defaults.lr)
 
-    def export(self, fname:str='export.pkl', destroy=False):
+    def export(self, fname:PathOrStr='export.pkl', destroy=False):
         "Export the state of the `Learner` in `self.path/fname`."
-        if os.environ.get('RANK'): return # don't save if slave proc
+        if rank_distrib(): return # don't save if slave proc
         args = ['opt_func', 'loss_func', 'metrics', 'true_wd', 'bn_wd', 'wd', 'train_bn', 'model_dir', 'callback_fns']
         state = {a:getattr(self,a) for a in args}
         state['cb_state'] = {cb.__class__:cb.get_state() for cb in self.callbacks}
@@ -227,7 +228,7 @@ class Learner():
 
     def save(self, name:PathOrStr, return_path:bool=False, with_opt:bool=True):
         "Save model and optimizer state (if `with_opt`) with `name` to `self.model_dir`."
-        if os.environ.get('RANK'): return # don't save if slave proc
+        if rank_distrib(): return # don't save if slave proc
         path = self.path/self.model_dir/f'{name}.pth'
         if not hasattr(self, 'opt'): with_opt=False
         if not with_opt: state = get_model(self.model).state_dict()
@@ -239,19 +240,24 @@ class Learner():
         "Return DataLoader for DatasetType `ds_type`."
         return self.data.dl(ds_type)
 
-    def load(self, name:PathOrStr, device:torch.device=None, strict:bool=True, with_opt:bool=None, purge:bool=True):
+    def load(self, name:PathOrStr, device:torch.device=None, strict:bool=True, with_opt:bool=None, purge:bool=True,
+            remove_module:bool=False):
         "Load model and optimizer state (if `with_opt`) `name` from `self.model_dir` using `device`."
         if purge: self.purge(clear_opt=ifnone(with_opt, False))
         if device is None: device = self.data.device
+        elif isinstance(device, int): device = torch.device('cuda', device)
         state = torch.load(self.path/self.model_dir/f'{name}.pth', map_location=device)
         if set(state.keys()) == {'model', 'opt'}:
-            get_model(self.model).load_state_dict(state['model'], strict=strict)
+            model_state = state['model']
+            if remove_module: model_state = remove_module_load(model_state)
+            get_model(self.model).load_state_dict(model_state, strict=strict)
             if ifnone(with_opt,True):
                 if not hasattr(self, 'opt'): self.create_opt(defaults.lr, self.wd)
                 try:    self.opt.load_state_dict(state['opt'])
                 except: pass
         else:
             if with_opt: warn("Saved filed doesn't contain an optimizer state.")
+            if remove_module: state = remove_module_load(state)
             get_model(self.model).load_state_dict(state, strict=strict)
         del state
         gc.collect()
@@ -274,10 +280,16 @@ class Learner():
         gc.collect()
         print("this Learner object self-destroyed - it still exists, but no longer usable")
 
+    def _get_writable_model_path(self):
+        path = self.path/self.model_dir
+        try: tmp_file = get_tmp_file(path)
+        except OSError as e:
+            raise Exception(f"{e}\nCan't write to '{path}', set `model_dir` attribute in Learner to a full libpath path that is writable") from None
+        os.remove(tmp_file)
+        return path
+
     def purge(self, clear_opt:bool=True):
         "Purge the `Learner` of all cached attributes to release some GPU memory."
-
-        tmp_file = get_tmp_file(self.path)
         attrs_all = [k for k in self.__dict__.keys() if not k.startswith("__")]
         attrs_pkl = ['bn_wd', 'callback_fns', 'layer_groups', 'loss_func', 'metrics', 'model',
                      'model_dir', 'opt_func', 'path', 'train_bn', 'true_wd', 'wd']
@@ -287,11 +299,14 @@ class Learner():
         state = {a:getattr(self, a) for a in attrs_pkl}
         state['cb_state'] = {cb.__class__:cb.get_state() for cb in self.callbacks}
         if hasattr(self, 'opt'): state['opt'] = self.opt.get_state()
+
+        tmp_file = get_tmp_file(self._get_writable_model_path())
         torch.save(state, open(tmp_file, 'wb'))
         for a in attrs_del: delattr(self, a)
         gc.collect()
         state = torch.load(tmp_file)
         os.remove(tmp_file)
+
         for a in attrs_pkl: setattr(self, a, state[a])
         cb_state = state.pop('cb_state')
         self.callbacks = [load_callback(c,s, self) for c,s in cb_state.items()]
@@ -444,13 +459,10 @@ class Recorder(LearnerCallback):
                      last_metrics=MetricsList, **kwargs:Any)->bool:
         "Save epoch info: num_batch, smooth_loss, metrics."
         self.nb_batches.append(num_batch)
-        if last_metrics is not None:
-            self.val_losses.append(last_metrics[0])
+        if last_metrics is not None: self.val_losses.append(last_metrics[0])
         else: last_metrics = [] if self.no_val else [None]
-        if hasattr(self, '_added_mets'): last_metrics += self._added_mets
         if len(last_metrics) > 1: self.metrics.append(last_metrics[1:])
         self.format_stats([epoch, smooth_loss] + last_metrics)
-        return False
 
     def format_stats(self, stats:TensorOrNumList)->None:
         "Format stats before printing."
@@ -459,10 +471,6 @@ class Recorder(LearnerCallback):
             str_stats.append('' if stat is None else str(stat) if isinstance(stat, int) else f'{stat:.6f}')
         if self.add_time: str_stats.append(format_time(time() - self.start_epoch))
         if not self.silent: self.pbar.write(str_stats, table=True)
-
-    def add_metrics(self, metrics):
-        "Add `metrics` to the inner stats."
-        self._added_mets = metrics
 
     def add_metric_names(self, names):
         "Add `names` to the inner metric names."
@@ -552,13 +560,13 @@ def load_callback(class_func, state, learn:Learner):
     for k,v in others.items(): setattr(res, k, v)
     return res
 
-def load_learner(path:PathOrStr, fname:PathOrStr='export.pkl', test:ItemList=None):
+def load_learner(path:PathOrStr, fname:PathOrStr='export.pkl', test:ItemList=None, **db_kwargs):
     "Load a `Learner` object saved with `export_state` in `path/fn` with empty data, optionally add `test` and load on `cpu`."
     state = torch.load(Path(path)/fname, map_location='cpu') if defaults.device == torch.device('cpu') else torch.load(Path(path)/fname)
     model = state.pop('model')
     src = LabelLists.load_state(path, state.pop('data'))
     if test is not None: src.add_test(test)
-    data = src.databunch()
+    data = src.databunch(**db_kwargs)
     cb_state = state.pop('cb_state')
     clas_func = state.pop('cls')
     res = clas_func(data, model, **state)
