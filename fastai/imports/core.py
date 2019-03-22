@@ -1,4 +1,4 @@
-import csv, gc, gzip, os, pickle, shutil, sys, warnings, yaml
+import csv, gc, gzip, os, pickle, shutil, sys, warnings, yaml, io, subprocess
 import math, matplotlib.pyplot as plt, numpy as np, pandas as pd, random
 import scipy.stats, scipy.special
 import abc, collections, hashlib, itertools, json, operator, pathlib
@@ -33,3 +33,9 @@ from numbers import Number
 from typing import Any, AnyStr, Callable, Collection, Dict, Hashable, Iterator, List, Mapping, NewType, Optional
 from typing import Sequence, Tuple, TypeVar, Union
 from types import SimpleNamespace
+
+def try_import(module):
+    "Try to import `module`. Returns module's object on success, None on failure"
+    try: return importlib.import_module(module)
+    except: return None
+

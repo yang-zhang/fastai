@@ -5,7 +5,7 @@ from .basic_data import *
 from .basic_train import *
 
 __all__ = ['BnFreeze', 'GradientClipping', 'ShowGraph', 'ClassificationInterpretation', 'fit_one_cycle', 'lr_find', 
-           'one_cycle_scheduler', 'to_fp16', 'to_fp32', 'mixup', 'AccumulateStepper']
+           'one_cycle_scheduler', 'to_fp16', 'to_fp32', 'mixup', 'AccumulateScheduler']
 
 def one_cycle_scheduler(lr_max:float, **kwargs:Any)->OneCycleScheduler:
     "Instantiate a `OneCycleScheduler` with `lr_max`."
@@ -32,12 +32,12 @@ def lr_find(learn:Learner, start_lr:Floats=1e-7, end_lr:Floats=10, num_it:int=10
     learn.fit(epochs, start_lr, callbacks=[cb], wd=wd)
 
 def to_fp16(learn:Learner, loss_scale:float=None, max_noskip:int=1000, dynamic:bool=False, clip:float=None,
-            flat_master:bool=False)->Learner:
+            flat_master:bool=False, max_scale:float=2**24)->Learner:
     "Put `learn` in FP16 precision mode."
     learn.model = model2half(learn.model)
     learn.data.add_tfm(batch_to_half)
     learn.mp_cb = MixedPrecision(learn, loss_scale=loss_scale, max_noskip=max_noskip, dynamic=dynamic, clip=clip, 
-                                 flat_master=flat_master)
+                                 flat_master=flat_master, max_scale=max_scale)
     learn.callbacks.append(learn.mp_cb)
     return learn
 
@@ -65,14 +65,14 @@ class ShowGraph(LearnerCallback):
     "Update a graph of learner stats and metrics after each epoch."
     def on_epoch_end(self, n_epochs:int, last_metrics:MetricsList, **kwargs)->bool:
         "If we have `last_metrics` plot them in our pbar graph"
-        if last_metrics is not None:
+        if last_metrics is not None and np.any(last_metrics):
             rec = self.learn.recorder
             iters = range_of(rec.losses)
             val_iter = np.array(rec.nb_batches).cumsum()
             x_bounds = (0, (n_epochs - len(rec.nb_batches)) * rec.nb_batches[-1] + len(rec.losses))
             y_bounds = (0, max((max(Tensor(rec.losses)), max(Tensor(rec.val_losses)))))
             rec.pbar.update_graph([(iters, rec.losses), (val_iter, rec.val_losses)], x_bounds, y_bounds)
-            return False
+        return {}
 
 class BnFreeze(LearnerCallback):
     "Freeze moving average statistics in all non-trainable batchnorm layers."
@@ -96,7 +96,7 @@ def clip_grad(learn:Learner, clip:float=0.1)->Learner:
     return learn
 Learner.clip_grad = clip_grad
      
-class AccumulateStepper(LearnerCallback):
+class AccumulateScheduler(LearnerCallback):
     "Does accumlated step every nth step by accumulating gradients"
     
     def __init__(self, learn:Learner, n_step:int = 1, drop_last:bool = False):
@@ -175,7 +175,7 @@ class ClassificationInterpretation():
             thresh = cm.max() / 2.
             for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
                 coeff = f'{cm[i, j]:.{norm_dec}f}' if normalize else f'{cm[i, j]}'
-                plt.text(j, i, coeff, horizontalalignment="center", color="white" if cm[i, j] > thresh else "black")
+                plt.text(j, i, coeff, horizontalalignment="center", verticalalignment="center", color="white" if cm[i, j] > thresh else "black")
 
         plt.tight_layout()
         plt.ylabel('Actual')

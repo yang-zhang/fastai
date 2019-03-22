@@ -1,6 +1,8 @@
 import pytest
 from fastai.gen_doc.doctest import this_tests
 from fastai.basics import *
+from fastai.vision import ImageList
+
 
 def chk(a,b): assert np.array_equal(a,b)
 
@@ -101,8 +103,8 @@ def test_category_processor_non_existing_class():
 def test_splitdata_datasets():
     c1,ratio,n = list('abc'),0.2,10
 
-    this_tests(ItemList.random_split_by_pct)
-    sd = ItemList(range(n)).random_split_by_pct(ratio).label_const(0)
+    this_tests(ItemList.split_by_rand_pct)
+    sd = ItemList(range(n)).split_by_rand_pct(ratio).label_const(0)
     assert len(sd.train)==(1-ratio)*n, 'Training set is right size'
     assert len(sd.valid)==ratio*n, 'Validation set is right size'
     assert set(list(sd.train.items)+list(sd.valid.items))==set(range(n)), 'All items covered'
@@ -123,15 +125,15 @@ def test_split_subsets():
 def test_regression():
     this_tests('na')
     df = pd.DataFrame({'x':range(100), 'y':np.random.rand(100)})
-    data = ItemList.from_df(df, path='.', cols=0).random_split_by_pct().label_from_df(cols=1).databunch()
+    data = ItemList.from_df(df, path='.', cols=0).split_by_rand_pct().label_from_df(cols=1).databunch()
     assert data.c==1
     assert isinstance(data.valid_ds, LabelList)
 
 def test_wrong_order():
     this_tests('na')
     path = untar_data(URLs.MNIST_TINY)
-    with pytest.raises(Exception):
-        src = ImageList.from_folder(path).label_from_folder().split_by_folder()
+    with pytest.raises(Exception, match="Your data isn't split*"):
+        ImageList.from_folder(path).label_from_folder().split_by_folder()
 
 class CustomDataset(Dataset):
     def __init__(self, data_list): self.data = copy(data_list)
@@ -146,3 +148,17 @@ def test_custom_dataset():
 
     # test property fallback
     assert data.loss_func == F.nll_loss
+
+def test_filter_by_folder():
+    this_tests(ItemList.filter_by_folder)
+    items = ["parent/in", "parent/out", "parent/unspecified_means_out"]
+
+    res = ItemList.filter_by_folder(
+        ItemList(items=[Path(p) for p in items], path="parent"),
+        include=["in", "and_in"], exclude=["out", "also_out"])
+    assert res.items == [Path("parent/in")]
+
+    res = ItemList.filter_by_folder(
+        ItemList(items=items),
+        include=["in", "and_in"], exclude=["out", "also_out"])
+    assert res.items == ["parent/in"]

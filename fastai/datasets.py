@@ -31,6 +31,12 @@ class URLs():
     MNIST_VAR_SIZE_TINY = f'{S3_IMAGE}mnist_var_size_tiny'
     PLANET_SAMPLE       = f'{URL}planet_sample'
     PLANET_TINY         = f'{URL}planet_tiny'
+    IMAGENETTE          = f'{S3_IMAGE}imagenette'
+    IMAGENETTE_160      = f'{S3_IMAGE}imagenette-160'
+    IMAGENETTE_320      = f'{S3_IMAGE}imagenette-320'
+    IMAGEWOOF           = f'{S3_IMAGE}imagewoof'
+    IMAGEWOOF_160       = f'{S3_IMAGE}imagewoof-160'
+    IMAGEWOOF_320       = f'{S3_IMAGE}imagewoof-320'
 
     # kaggle competitions download dogs-vs-cats -p {DOGS.absolute()}
     DOGS = f'{URL}dogscats'
@@ -63,6 +69,8 @@ class URLs():
     CAMVID             = f'{S3_IMAGELOC}camvid'
     CAMVID_TINY        = f'{URL}camvid_tiny'
     LSUN_BEDROOMS      = f'{S3_IMAGE}bedroom'
+    PASCAL_2007        = f'{S3_IMAGELOC}pascal_2007'
+    PASCAL_2012        = f'{S3_IMAGELOC}pascal_2012'
 
     #Pretrained models
     OPENAI_TRANSFORMER = f'{S3_MODEL}transformer'
@@ -102,6 +110,8 @@ _checks = {
     URLs.MNIST_VAR_SIZE_TINY:(565372, 'b71a930f4eb744a4a143a6c7ff7ed67f'),
     URLs.MT_ENG_FRA:(2598183296, '69573f58e2c850b90f2f954077041d8c'),
     URLs.OPENAI_TRANSFORMER:(432848315, '024b0d2203ebb0cd1fc64b27cf8af18e'),
+    URLs.PASCAL_2007:(1636130334, 'a70574e9bc592bd3b253f5bf46ce12e3'),
+    URLs.PASCAL_2012:(2611715776, '2ae7897038383836f86ce58f66b09e31'),
     URLs.PETS:(811706944, 'e4db5c768afd933bb91f5f594d7417a4'),
     URLs.PLANET_SAMPLE:(15523994, '8bfb174b3162f07fbde09b54555bdb00'),
     URLs.PLANET_TINY:(997569, '490873c5683454d4b2611fb1f00a68a9'),
@@ -117,11 +127,12 @@ _checks = {
 
 #TODO: This can probably be coded more shortly and nicely.
 class Config():
-    "Creates a default config file at `~/.fastai/config.yml`"
-    DEFAULT_CONFIG_PATH = '~/.fastai/config.yml'
+    "Creates a default config file 'config.yml' in $FASTAI_HOME (default `~/.fastai/`)"
+    DEFAULT_CONFIG_LOCATION = os.path.expanduser(os.getenv('FASTAI_HOME', '~/.fastai'))
+    DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_LOCATION + '/config.yml'
     DEFAULT_CONFIG = {
-        'data_path': '~/.fastai/data',
-        'model_path': '~/.fastai/models'
+        'data_path': DEFAULT_CONFIG_LOCATION + '/data',
+        'model_path': DEFAULT_CONFIG_LOCATION + '/models'
     }
 
     @classmethod
@@ -150,7 +161,7 @@ class Config():
         fpath = _expand_path(fpath or cls.DEFAULT_CONFIG_PATH)
         if not fpath.exists() and create_missing: cls.create(fpath)
         assert fpath.exists(), f'Could not find config at: {fpath}. Please create'
-        with open(fpath, 'r') as yaml_file: return yaml.load(yaml_file)
+        with open(fpath, 'r') as yaml_file: return yaml.safe_load(yaml_file)
 
     @classmethod
     def create(cls, fpath):
@@ -164,32 +175,34 @@ class Config():
 
 def _expand_path(fpath): return Path(fpath).expanduser()
 def url2name(url): return url.split('/')[-1]
-def url2path(url, data=True):
+
+#TODO: simplify this mess
+def url2path(url, data=True, ext:str='.tgz'):
     "Change `url` to a path."
     name = url2name(url)
-    return datapath4file(name) if data else modelpath4file(name)
-def _url2tgz(url, data=True):
-    return datapath4file(f'{url2name(url)}.tgz') if data else modelpath4file(f'{url2name(url)}.tgz')
+    return datapath4file(name, ext=ext) if data else modelpath4file(name, ext=ext)
+def _url2tgz(url, data=True, ext:str='.tgz'):
+    return datapath4file(f'{url2name(url)}{ext}', ext=ext) if data else modelpath4file(f'{url2name(url)}{ext}', ext=ext)
 
-def modelpath4file(filename):
+def modelpath4file(filename, ext:str='.tgz'):
     "Return model path to `filename`, checking locally first then in the config file."
     local_path = URLs.LOCAL_PATH/'models'/filename
-    if local_path.exists() or local_path.with_suffix('.tgz').exists(): return local_path
+    if local_path.exists() or local_path.with_suffix(ext).exists(): return local_path
     else: return Config.model_path()/filename
 
-def datapath4file(filename):
+def datapath4file(filename, ext:str='.tgz'):
     "Return data path to `filename`, checking locally first then in the config file."
     local_path = URLs.LOCAL_PATH/'data'/filename
-    if local_path.exists() or local_path.with_suffix('.tgz').exists(): return local_path
+    if local_path.exists() or local_path.with_suffix(ext).exists(): return local_path
     else: return Config.data_path()/filename
 
-def download_data(url:str, fname:PathOrStr=None, data:bool=True) -> Path:
+def download_data(url:str, fname:PathOrStr=None, data:bool=True, ext:str='.tgz') -> Path:
     "Download `url` to destination `fname`."
-    fname = Path(ifnone(fname, _url2tgz(url, data)))
+    fname = Path(ifnone(fname, _url2tgz(url, data, ext=ext)))
     os.makedirs(fname.parent, exist_ok=True)
     if not fname.exists():
         print(f'Downloading {url}')
-        download_url(f'{url}.tgz', fname)
+        download_url(f'{url}{ext}', fname)
     return fname
 
 def _check_file(fname):

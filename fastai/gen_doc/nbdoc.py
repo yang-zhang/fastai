@@ -10,6 +10,7 @@ from .docstrings import *
 from .core import *
 from ..torch_core import *
 from .nbtest import get_pytest_html
+from ..utils.ipython import IS_IN_COLAB
 
 __all__ = ['get_fn_link', 'link_docstring', 'show_doc', 'get_ft_names',
            'get_exports', 'show_video', 'show_video_from_youtube', 'import_mod', 'get_source_link',
@@ -78,7 +79,7 @@ def format_param(p):
 def format_ft_def(func, full_name:str=None)->str:
     "Format and link `func` definition to show in documentation"
     sig = inspect.signature(func)
-    name = f'<code>{ifnone(full_name, func.__name__)}</code>'
+    name = f'<code>{full_name or func.__name__}</code>'
     fmt_params = [format_param(param) for name,param
                   in sig.parameters.items() if name not in ('self','cls')]
     arg_str = f"({', '.join(fmt_params)})"
@@ -114,12 +115,11 @@ def show_doc(elt, doc_string:bool=True, full_name:str=None, arg_comments:dict=No
     source_link = get_function_source(elt) if is_fastai_class(elt) else ""
     test_link, test_modal = get_pytest_html(elt, anchor_id=anchor_id) if show_tests else ('', '')
     title_level = ifnone(title_level, 2 if inspect.isclass(elt) else 4)
-    doc =  f'<h{title_level} id="{anchor_id}">{name}{source_link}{test_link}</h{title_level}>'
-    doc += f'\n\n> {args}'
+    doc =  f'<h{title_level} id="{anchor_id}" class="doc_header">{name}{source_link}{test_link}</h{title_level}>'
+    doc += f'\n\n> {args}\n\n'
+    doc += f'{test_modal}'
     if doc_string and (inspect.getdoc(elt) or arg_comments):
         doc += format_docstring(elt, arg_comments, alt_doc_string, ignore_warn) + ' '
-    doc += '\n\n'
-    doc += f'{test_modal}' # hidden popup for tests doc. appending separately so it doesn't inherit css from <h{title_level}>
     if markdown: display(Markdown(doc))
     else: return doc
 
@@ -133,9 +133,9 @@ def doc(elt):
         md += f'\n\n<a href="{get_fn_link(elt)}" target="_blank" rel="noreferrer noopener">Show in docs</a>'
     output = HTMLExporter().markdown2html(md)
     use_relative_links = True
-    try:    page.page({'text/html': output})
-    except: 
-        try:    get_ipython().run_cell_magic(u'HTML', u'', output)
+    if IS_IN_COLAB: get_ipython().run_cell_magic(u'html', u'', output)
+    else:
+        try: page.page({'text/html': output})
         except: display(Markdown(md))
 
 def format_docstring(elt, arg_comments:dict={}, alt_doc_string:str='', ignore_warn:bool=False)->str:
@@ -269,7 +269,7 @@ def get_anchor(fn)->str:
     return fn_name(fn)
 
 def fn_name(ft)->str:
-    if ft in _typing_names: return _typing_names[ft]
+    if ft.__hash__ and ft in _typing_names: return _typing_names[ft]
     if hasattr(ft, '__name__'):   return ft.__name__
     elif hasattr(ft,'_name') and ft._name: return ft._name
     elif hasattr(ft,'__origin__'): return str(ft.__origin__).split('.')[-1]

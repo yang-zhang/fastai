@@ -8,7 +8,7 @@ __all__ = ['DataBunch', 'DeviceDataLoader', 'DatasetType', 'load_data']
 old_dl_init = torch.utils.data.DataLoader.__init__
 
 def intercept_args(self, dataset, batch_size=1, shuffle=False, sampler=None, batch_sampler=None,
-                 num_workers=0, collate_fn=default_collate, pin_memory=False, drop_last=False,
+                 num_workers=0, collate_fn=default_collate, pin_memory=True, drop_last=False,
                  timeout=0, worker_init_fn=None):
     self.init_kwargs = {'batch_size':batch_size, 'shuffle':shuffle, 'sampler':sampler, 'batch_sampler':batch_sampler,
                         'num_workers':num_workers, 'collate_fn':collate_fn, 'pin_memory':pin_memory,
@@ -151,7 +151,7 @@ class DataBunch():
         if not getattr(self, 'label_list', False):
             warn("Serializing the `DataBunch` only works when you created it using the data block API.")
             return
-        torch.save(self.label_list, self.path/fname)
+        try_save(self.label_list, self.path, fname)
 
     def add_test(self, items:Iterator, label:Any=None)->None:
         "Add the `items` as a test set. Pass along `label` otherwise label them with `EmptyLabel`."
@@ -180,9 +180,10 @@ class DataBunch():
         with ds.set_item(item):
             return self.one_batch(ds_type=DatasetType.Single, detach=detach, denorm=denorm, cpu=cpu)
 
-    def show_batch(self, rows:int=5, ds_type:DatasetType=DatasetType.Train, **kwargs)->None:
+    def show_batch(self, rows:int=5, ds_type:DatasetType=DatasetType.Train, reverse:bool=False, **kwargs)->None:
         "Show a batch of data in `ds_type` on a few `rows`."
         x,y = self.one_batch(ds_type, True, True)
+        if reverse: x,y = x.flip(0),y.flip(0)
         n_items = rows **2 if self.train_ds.x._square_show else rows
         if self.dl(ds_type).batch_size < n_items: n_items = self.dl(ds_type).batch_size
         xs = [self.train_ds.x.reconstruct(grab_idx(x, i)) for i in range(n_items)]
@@ -191,11 +192,11 @@ class DataBunch():
             ys = [self.train_ds.y.reconstruct(grab_idx(y, i), x=x) for i,x in enumerate(xs)]
         else : ys = [self.train_ds.y.reconstruct(grab_idx(y, i)) for i in range(n_items)]
         self.train_ds.x.show_xys(xs, ys, **kwargs)
-
+ 
     def export(self, fname:str='export.pkl'):
         "Export the minimal state of `self` for inference in `self.path/fname`."
         xtra = dict(normalize=self.norm.keywords) if getattr(self, 'norm', False) else {}
-        self.valid_ds.export(self.path/fname, **xtra)
+        try_save(self.valid_ds.get_state(**xtra), self.path, fname)
 
     def _grab_dataset(self, dl:DataLoader):
         ds = dl.dl.dataset
@@ -222,6 +223,12 @@ class DataBunch():
         if hasattr(self.valid_ds, 'items') and len(self.valid_ds.items) == 0: return True
         return (len(self.valid_ds) == 0)
 
+    @property
+    def is_empty(self)->bool:
+        return not ((self.train_dl and len(self.train_ds.items) != 0) or 
+                    (self.valid_dl and len(self.valid_ds.items) != 0) or 
+                    (self.test_dl  and len(self.test_ds.items)  != 0))
+    
     @property
     def batch_size(self):   return self.train_dl.batch_size
     @batch_size.setter

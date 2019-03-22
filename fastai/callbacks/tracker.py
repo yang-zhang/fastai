@@ -40,10 +40,11 @@ class TrackerCallback(LearnerCallback):
         "Pick the monitored value."
         if self.monitor=='trn_loss' and len(self.learn.recorder.losses) == 0: return None
         elif len(self.learn.recorder.val_losses) == 0: return None
-        values = {'trn_loss':self.learn.recorder.losses[-1:][0].cpu().numpy(),
-                  'val_loss':self.learn.recorder.val_losses[-1:][0]}
-        for i, name in enumerate(self.learn.recorder.names[3:-1]):
-            values[name]=self.learn.recorder.metrics[-1:][0][i]
+        values = {'trn_loss':self.learn.recorder.losses[-1].cpu().numpy(),
+                  'val_loss':self.learn.recorder.val_losses[-1]}
+        if values['val_loss'] is None: return
+        for m, n in zip(self.learn.recorder.metrics[-1],self.learn.recorder.names[3:-1]):
+            values[n] = m
         if values.get(self.monitor) is None:
             warn(f'{self.__class__} conditioned on metric `{self.monitor}` which is not available. Available metrics are: {", ".join(map(str, self.learn.recorder.names[1:]))}')
         return values.get(self.monitor)
@@ -71,7 +72,7 @@ class EarlyStoppingCallback(TrackerCallback):
             self.wait += 1
             if self.wait > self.patience:
                 print(f'Epoch {epoch}: early stopping')
-                return True
+                return {"stop_training":True}
 
 class SaveModelCallback(TrackerCallback):
     "A `TrackerCallback` that saves the model when monitored quantity is best."
@@ -83,7 +84,9 @@ class SaveModelCallback(TrackerCallback):
             self.every = 'improvement'
                  
     def jump_to_epoch(self, epoch:int)->None:
-        try: self.learn.load(f'{self.name}_{epoch-1}')
+        try: 
+            self.learn.load(f'{self.name}_{epoch-1}', purge=False)
+            print(f"Loaded {self.name}_{epoch-1}")
         except: print(f'Model {self.name}_{epoch-1} not found.')
 
     def on_epoch_end(self, epoch:int, **kwargs:Any)->None:
@@ -99,7 +102,7 @@ class SaveModelCallback(TrackerCallback):
     def on_train_end(self, **kwargs):
         "Load the best model."
         if self.every=="improvement" and (self.learn.path/f'{self.learn.model_dir}/{self.name}.pth').is_file():
-            self.learn.load(f'{self.name}')
+            self.learn.load(f'{self.name}', purge=False)
 
 class ReduceLROnPlateauCallback(TrackerCallback):
     "A `TrackerCallback` that reduces learning rate when a metric has stopped improving."
@@ -132,6 +135,7 @@ class TrackEpochCallback(LearnerCallback):
     def __init__(self, learn:Learner, name:str='epoch', epoch_offset:int=None):
         "Store completed epoch number in `learn.model_dir/name`."
         super().__init__(learn)
+        learn._test_writeable_path()
         self.path = learn.path/learn.model_dir/name
         if epoch_offset is None:
             if os.path.isfile(self.path):
@@ -146,3 +150,4 @@ class TrackEpochCallback(LearnerCallback):
     def on_epoch_end(self, epoch, **kwargs:Any)->None:
         with self.path.open('w') as f: f.write(f'{epoch}')
 
+    def restart(self): os.remove(self.path)

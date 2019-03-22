@@ -55,6 +55,15 @@ Most of this document is various notes explaining how to do all kinds of things 
    Note that this guide helps you to write tests with a plain git checkout, without needing to fork and branch, so that you can get results faster and easier. But once you're ready, then switch to your own fork and branch as explained in the guide above. You can just copy the files over to the new branch. Of course, feel free, to start with making a PR branch first - whatever is the easiest for you.
 
 
+## Handy things
+
+Here is a bunch of useful pytest extensions to install (most are discussed somewhere in this document):
+```
+pip install pytest-xdist pytest-sugar pytest-repeat pytest-picked pytest-forked pytest-flakefinder pytest-cov nbsmoke
+```
+
+Only `pytest-sugar` will automatically change `pytest`'s behavior (in a nice way), so remove it from the list if you don't like it. All the other extensions need to be explicitly enabled via `pytest` flag to have an impact, so are safe to install.
+
 ## Automated tests
 
 At the moment there are only a few automated tests, so we need to start expanding it! It's not easy to properly automatically test ML code, but there's lots of opportunities for unit tests.
@@ -516,7 +525,7 @@ def test_non_fastai_func():
 ```
 But we still want the call to be there, since we run a check to make sure we don't miss out on any tests, hence each test needs to have this call.
 
-The test registry is located at `fastai/test_api_db.json` and it gets auto-generated when `pytest` gets a `--testapireg` flag, which is currently done when `make test-full` is run.
+The test registry is located at `fastai/test_registry.json` and it gets auto-generated or updated when `pytest` is run.
 
 
 ### Expensive object reuse
@@ -552,7 +561,7 @@ def path():
 @pytest.fixture(scope="module")
 def learn(path):
     data = ImageDataBunch.from_folder(path, ds_tfms=([], []), bs=2)
-    learn = create_cnn(data, models.resnet18, metrics=accuracy)
+    learn = cnn_learner(data, models.resnet18, metrics=accuracy)
     return learn
 
 def test_val_loss(learn):
@@ -744,6 +753,7 @@ and may have their own command line option to be used instead, which are defined
 ```
 custom options:
   --runslow             run slow tests
+  --runcpp              run cuda cpp extension tests
   --skipint             skip integration tests
 ```
 

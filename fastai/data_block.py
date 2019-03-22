@@ -14,6 +14,7 @@ def _maybe_squeeze(arr): return (arr if is1d(arr) else np.squeeze(arr))
 
 def _get_files(parent, p, f, extensions):
     p = Path(p)#.relative_to(parent)
+    if isinstance(extensions,str): extensions = [extensions]
     low_extensions = [e.lower() for e in extensions] if extensions is not None else None
     res = [p/o for o in f if not o.startswith('.')
            and (extensions is None or f'.{o.split(".")[-1].lower()}' in low_extensions)]
@@ -98,6 +99,9 @@ class ItemList():
 
     def add(self, items:'ItemList'):
         self.items = np.concatenate([self.items, items.items], 0)
+        if self.inner_df is not None and items.inner_df is not None:
+            self.inner_df = pd.concat([self.inner_df, items.inner_df])
+        else: self.inner_df = self.inner_df or items.inner_df
         return self
 
     def __getitem__(self,idxs:int)->Any:
@@ -151,7 +155,8 @@ class ItemList():
         "Only keep filenames in `include` folder or reject the ones in `exclude`."
         include,exclude = listify(include),listify(exclude)
         def _inner(o):
-            n = o.relative_to(self.path).parts[0]
+            if isinstance(o, Path): n = o.relative_to(self.path).parts[0]
+            else: n = o.split(os.path.sep)[len(str(self.path).split(os.path.sep))]
             if include and not n in include: return False
             if exclude and     n in exclude: return False
             return True
@@ -161,8 +166,12 @@ class ItemList():
         "Keep random sample of `items` with probability `p` and an optional `seed`."
         if seed is not None: np.random.seed(seed)
         return self.filter_by_func(lambda o: rand_bool(p))
-
+                
     def no_split(self):
+        warn("`no_split` is deprecated, please use `split_none`.")
+        return self.split_none()
+
+    def split_none(self):
         "Don't split the data and create an empty validation set."
         val = self[[]]
         val.ignore_empty = True
@@ -188,10 +197,14 @@ class ItemList():
     def split_by_folder(self, train:str='train', valid:str='valid')->'ItemLists':
         "Split the data depending on the folder (`train` or `valid`) in which the filenames are."
         return self.split_by_idxs(self._get_by_folder(train), self._get_by_folder(valid))
-
-    def random_split_by_pct(self, valid_pct:float=0.2, seed:int=None)->'ItemLists':
+     
+    def random_split_by_pct(self, valid_pct:float=0.2, seed:int=None):
+        warn("`random_split_by_pct` is deprecated, please use `split_by_rand_pct`.")
+        return self.split_by_rand_pct(valid_pct=valid_pct, seed=seed)         
+    
+    def split_by_rand_pct(self, valid_pct:float=0.2, seed:int=None)->'ItemLists':
         "Split the items randomly by putting `valid_pct` in the validation set, optional `seed` can be passed."
-        if valid_pct==0.: return self.no_split()
+        if valid_pct==0.: return self.split_none()
         if seed is not None: np.random.seed(seed)
         rand_idx = np.random.permutation(range_of(self))
         cut = int(valid_pct * len(self))
@@ -243,7 +256,7 @@ class ItemList():
     def _label_from_list(self, labels:Iterator, label_cls:Callable=None, from_item_lists:bool=False, **kwargs)->'LabelList':
         "Label `self.items` with `labels`."
         if not from_item_lists: 
-            raise Exception("Your data isn't split, if you don't want a validation set, please use `no_split`.")
+            raise Exception("Your data isn't split, if you don't want a validation set, please use `split_none`.")
         labels = array(labels, dtype=object)
         label_cls = self.get_label_cls(labels, label_cls=label_cls, **kwargs)
         y = label_cls(labels, path=self.path, **kwargs)
@@ -265,7 +278,8 @@ class ItemList():
 
     def label_empty(self, **kwargs):
         "Label every item with an `EmptyLabel`."
-        return self.label_from_func(func=lambda o: 0., label_cls=EmptyLabelList)
+        kwargs['label_cls'] = EmptyLabelList
+        return self.label_from_func(func=lambda o: 0., **kwargs)
 
     def label_from_func(self, func:Callable, label_cls:Callable=None, **kwargs)->'LabelList':
         "Apply `func` to every input to get its label."
@@ -300,7 +314,7 @@ class CategoryProcessor(PreProcessor):
     "`PreProcessor` that create `classes` from `ds.items` and handle the mapping."
     def __init__(self, ds:ItemList):
         self.create_classes(ds.classes)
-        self.warns = []
+        self.state_attrs,self.warns = ['classes'],[]
 
     def create_classes(self, classes):
         self.classes = classes
@@ -322,8 +336,12 @@ class CategoryProcessor(PreProcessor):
         ds.c2i = self.c2i
         super().process(ds)
 
-    def __getstate__(self): return {'classes':self.classes}
-    def __setstate__(self, state:dict): self.create_classes(state['classes'])
+    def __getstate__(self): return {n:getattr(self,n) for n in self.state_attrs}
+    def __setstate__(self, state:dict): 
+        self.create_classes(state['classes'])
+        self.state_attrs = state.keys()
+        for n in state.keys(): 
+            if n!='classes': setattr(self, n, state[n])
 
 class CategoryListBase(ItemList):
     "Basic `ItemList` for classification."
@@ -358,11 +376,7 @@ class MultiCategoryProcessor(CategoryProcessor):
     def __init__(self, ds:ItemList, one_hot:bool=False):
         super().__init__(ds)
         self.one_hot = one_hot
-
-    def __getstate__(self): return {'classes':self.classes, 'one_hot':self.one_hot}
-    def __setstate__(self, state:dict):
-        self.create_classes(state['classes'])
-        self.one_hot = state['one_hot']
+        self.state_attrs.append('one_hot')
 
     def process_one(self,item):
         if self.one_hot or isinstance(item, EmptyLabel): return item
@@ -425,7 +439,7 @@ class ItemLists():
         if not self.train.ignore_empty and len(self.train.items) == 0:
             warn("Your training set is empty. If this is by design, pass `ignore_empty=True` to remove this warning.")
         if not self.valid.ignore_empty and len(self.valid.items) == 0:
-            warn("""Your validation set is empty. If this is by design, use `no_split()`
+            warn("""Your validation set is empty. If this is by design, use `split_none()`
                  or pass `ignore_empty=True` when labelling to remove this warning.""")
         if isinstance(self.train, LabelList): self.__class__ = LabelLists
 
@@ -508,6 +522,10 @@ class LabelLists(ItemLists):
         for ds in self.lists:
             if getattr(ds, 'warn', False): warn(ds.warn)
         return self
+                
+    def filter_by_func(self, func:Callable):
+        for ds in self.lists: ds.filter_by_func(func)
+        return self
 
     def databunch(self, path:PathOrStr=None, bs:int=64, val_bs:int=None, num_workers:int=defaults.cpus,
                   dl_tfms:Optional[Collection[Callable]]=None, device:torch.device=None, collate_fn:Callable=data_collate,
@@ -549,7 +567,8 @@ class LabelLists(ItemLists):
     @classmethod
     def load_empty(cls, path:PathOrStr, fn:PathOrStr='export.pkl'):
         "Create a `LabelLists` with empty sets from the serialized file in `path/fn`."
-        state = pickle.load(open(path/fn, 'rb'))
+        path = Path(path)
+        state = torch.load(open(path/fn, 'rb'))
         return LabelLists.load_state(path, state)
 
 def _check_kwargs(ds:ItemList, tfms:TfmList, **kwargs):
@@ -663,7 +682,7 @@ class LabelList(Dataset):
         "Launch the processing on `self.x` and `self.y` with `xp` and `yp`."
         self.y.process(yp)
         if getattr(self.y, 'filter_missing_y', False):
-            filt = array([o is None for o in self.y])
+            filt = array([o is None for o in self.y.items])
             if filt.sum()>0:
                 #Warnings are given later since progress_bar might make them disappear.
                 self.warn = f"You are labelling your items with {self.y.__class__.__name__}.\n"
@@ -676,6 +695,11 @@ class LabelList(Dataset):
                     p.warns = []
                 self.x,self.y = self.x[~filt],self.y[~filt]
         self.x.process(xp)
+        return self
+                
+    def filter_by_func(self, func:Callable):
+        filt = array([func(x,y) for x,y in zip(self.x.items, self.y.items)])
+        self.x,self.y = self.x[~filt],self.y[~filt]
         return self
 
     def transform(self, tfms:TfmList, tfm_y:bool=None, **kwargs):
@@ -697,7 +721,7 @@ class LabelList(Dataset):
 
     def databunch(self, **kwargs):
         "To throw a clear error message when the data wasn't split."
-        raise Exception("Your data isn't split, if you don't want a validation set, please use `no_split`")
+        raise Exception("Your data isn't split, if you don't want a validation set, please use `split_none`")
 
 @classmethod
 def _databunch_load_empty(cls, path, fname:str='export.pkl'):
